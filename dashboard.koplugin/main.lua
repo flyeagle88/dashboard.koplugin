@@ -171,7 +171,7 @@ local TOP_STRIP_DELAY = 0.9
 -- 版本号：显示在菜单「使用说明」那一项上。改动行为后一定同步改这里，
 -- 上机时一眼就能确认「装的到底是不是刚改的这份」（避免文件没覆盖到、
 -- 或者覆盖了但 KOReader 没重启，还在跑内存里的旧模块）。
-local DASHBOARD_VERSION = "2.67"
+local DASHBOARD_VERSION = "2.68"
 
 -- 唤醒宽限期：刚醒来的这几秒里先不拉天气。http.TIMEOUT 是 20 秒，三个接口
 -- 外加 LuaSec/socket.http 双通道，最坏能同步卡住一两分钟；而休眠之后天气必然过期，
@@ -1903,11 +1903,24 @@ function Dashboard:close()
         UIManager:close(root)
     end
     self:restoreKindleScreenSaverLock()
-    -- 把屏幕转回打开看板前的方向，否则退出看板后整个 KOReader 都是横的
-    if self.rotation_changed and self.base_rotation ~= nil and Screen.setRotationMode then
-        pcall(function() Screen:setRotationMode(self.base_rotation) end)
-        self.rotation_changed = false
-        UIManager:setDirty(nil, "full")
+    -- 把屏幕转回打开看板前的方向，否则退出看板后整个 KOReader 都是横的。
+    -- v2.68：这里必须走和 rotateScreen 一样的入口，理由见 restoreRotation 的注释。
+    if self.rotation_changed and self.base_rotation ~= nil then
+        local how = self:restoreRotation()
+        -- "event"：ReaderView:rotate() 内部已经 setDirty(nil, "full")，这里不用再刷。
+        -- 其余两种情况都必须自己推一帧，否则屏幕会停在看板那一帧上：
+        --   "noop"   方向从来没变过（这台机器上「横屏」只是换版式），
+        --            ReaderView 判定「方向没变」直接返回，不会重绘；
+        --   "direct" 只改了 Screen，ReaderView 没收到重排通知，
+        --            先推一帧过渡，半秒后再推一帧把它重排后的结果顶上去。
+        if how ~= "event" then
+            pcall(function() UIManager:setDirty(nil, "full") end)
+            if how == "direct" then
+                UIManager:scheduleIn(0.6, function()
+                    pcall(function() UIManager:setDirty(nil, "full") end)
+                end)
+            end
+        end
     end
 end
 
@@ -2700,6 +2713,34 @@ function Dashboard:netInfo()
     return info
 end
 
+--- 同一次重排里共用一份「电量 + 网络」读数。
+--- v2.68：顶栏和 C 区各自调一次 netInfo，而 netInfo 内部又要调一次 batteryInfo——
+--- 一次重排里 getCapacity（读 sysfs / 问 gasgauge）要跑好几遍，NetworkMgr 也要问两遍。
+--- 电量和连网状态不会在几十毫秒内变，按 ctx 缓存，一次重排只读一次。
+--- ctx 为空时（菜单、设置写回这类非渲染调用）照旧现读。
+function Dashboard:ctxNet(ctx)
+    if not ctx then return self:netInfo() end
+    if ctx.net == nil then ctx.net = self:netInfo() end
+    return ctx.net
+end
+
+--- 同一次重排里共用一份分区配置：getZoneLayout 每次都要读设置、逐项校验 2×3 个组件，
+--- 而 buildZone 会被三个区各调一次。
+function Dashboard:ctxZoneLayout(ctx)
+    if not ctx then return self:getZoneLayout() end
+    if ctx.zone_layout == nil then ctx.zone_layout = self:getZoneLayout() end
+    return ctx.zone_layout
+end
+
+--- 同一次重排里共用一份在读信息：readingInfo 会去开 sidecar 读文档设置，
+--- 打开看板、唤醒、转屏、休眠屏保每次重排都要付一遍这样的读盘开销。
+--- 用 false 表示「查过了，但没有在读的书」，免得反复去查同一个空结果。
+function Dashboard:ctxReading(ctx)
+    if not ctx then return self:readingInfo() end
+    if ctx.reading == nil then ctx.reading = self:readingInfo() or false end
+    return ctx.reading or nil
+end
+
 --- 节气进度：当前节气已过天数 / 节气总长
 function Dashboard:solarTermRatio(ctx)
     local cur, nxt = ctx.cur_term, ctx.next_term
@@ -2905,6 +2946,53 @@ function Dashboard:rotateScreen(mode)
         return false
     end
     return screen_rotation() == target
+end
+
+--- 退出看板时把屏幕转回打开前的方向。
+--- 返回值有三态：
+---   "event"  —— 方向真的变了，且已通过 ReaderView/FileManager 的入口转回（重排是同步的）
+---   "noop"   —— 方向本来就是对的，什么都没做（看板「横屏」在部分机器上只是换版式）
+---   "direct" —— 只直接改了 Screen，重排没被通知到（调用方要自己补刷）
+---
+--- v2.68：以前这里只调 Screen:setRotationMode 就完事，于是退出看板后三四秒里
+--- 阅读页还会按横屏版式排（正文挤在左上）。原因和 v2.57 在 rotateScreen 里踩到的
+--- 是同一个：Screen:setRotationMode 只改内部旋转计数、重建 blitbuffer，
+--- 真正「按新尺寸重排」是 ReaderView:onSetRotationMode → rotate() 里做的
+--- （SetDimensions → recalculate）。绕过它就没人重排，只能等某个迟到的事件自愈。
+--- 走 ui.view:onSetRotationMode 时重排是**同步**完成的，事件返回时版面已经对了，
+--- 所以这里不需要再延时补刷——「等重排完再刷」等于「事件返回后再刷」。
+--- 拿不到入口时才退回直接 set，并让 close() 那侧补一刷兜底。
+function Dashboard:restoreRotation()
+    local base = self.base_rotation
+    if base == nil then return "noop" end
+    local ui = self.ui
+    local can_event = (ui and ui.view and ui.view.onSetRotationMode)
+        or (ui and ui.onSetRotationMode)
+    -- 方向本来就是对的：不转、也不重排。这里必须如实告诉调用方「什么都没做」，
+    -- 因为 root 被撤掉之后屏幕还得靠刷新才能变回阅读页——ReaderView 在这种情况下
+    -- 判定 mode == old_mode 直接返回，一个 setDirty 都不会发。
+    if screen_rotation() == base then
+        self.rotation_changed = false
+        return "noop"
+    end
+    local ok, err = pcall(function()
+        if ui and ui.view and ui.view.onSetRotationMode then
+            -- ReaderView：内部判 mode ~= 当前值，再 setRotationMode + rotate() 重排
+            ui.view:onSetRotationMode(base)
+        elseif ui and ui.onSetRotationMode then
+            -- FileManager
+            ui:onSetRotationMode(base)
+        elseif Screen.setRotationMode then
+            Screen:setRotationMode(base)
+        end
+    end)
+    self.rotation_changed = false
+    if not ok then
+        logger.warn("dashboard: 恢复方向失败", tostring(err))
+        return "direct"
+    end
+    -- 只有走事件入口才算「重排已被通知到」；直调 Screen 的那条路没人重排
+    return can_event and "event" or "direct"
 end
 
 --- 当前方向，供菜单打勾（以屏幕实际旋转值为准）
@@ -3765,6 +3853,39 @@ local function stretchGaps(body, vk)
     end
 end
 
+--- 反解「分块之间的空白最多能放大到几倍」：纯算术，一棵树都不建。
+--- v2.68：以前是逐档建树试探（VK_STEP 一档建一棵，最多 15 棵），但总高对 vk 是
+--- **线性**的——stretchGaps 只把顶层 is_gap 行的 h 乘以 vk，字号、宽度、其他行都不动：
+---     总高(k) = 固定部分 + Σ floor(该行原高 × k)
+--- 所以量一次就能反解出最大档位。取整必须逐行 floor 算，不能拿「平均高 × 行数」估：
+--- 十几行各向下取整，累计能差出几十像素，估出来的档位会撑破版心。
+local function fitGapScale(body, base_h, limit_h)
+    local gaps, gap_sum = {}, 0
+    for i = 1, #body do
+        local row = body[i]
+        if row.is_gap and type(row.dimen) == "table" and row.dimen.h > 1 then
+            gaps[#gaps + 1] = row.dimen.h
+            gap_sum = gap_sum + row.dimen.h
+        end
+    end
+    if gap_sum <= 0 then return 1 end
+    local fixed_h = base_h - gap_sum   -- 拿掉全部留白之后的固定高度
+    local best = 1
+    local max_i = math.floor((VK_MAX - 1) / VK_STEP + 0.5)
+    for i = 1, max_i do
+        local k = 1 + VK_STEP * i
+        if k > VK_MAX + 1e-9 then break end
+        local sum = 0
+        for j = 1, #gaps do sum = sum + math.floor(gaps[j] * k) end
+        if fixed_h + sum <= limit_h then
+            best = k
+        else
+            break
+        end
+    end
+    return best
+end
+
 function Dashboard:createRoot()
     local W, H = Screen:getWidth(), Screen:getHeight()
     -- 版式方向：默认按屏幕像素尺寸判断；左右滑动切换过之后由 force_landscape 指定。
@@ -3834,24 +3955,26 @@ function Dashboard:createRoot()
         S = S * FIT_STEP
     end
 
-    -- 装得下就再往上撑：逐档放大分块间距，取仍然装得下的最大一档。
+    -- 装得下就再往上撑：把纵向余量吸进分块之间的空白。
     -- 竖屏 PW3 上余量有 180px 左右，撑到 1.4~1.6 倍才吃满，上下不再空出两条大带。
+    --
+    -- v2.68：原来这里是「建树试探」——build(1) 之后按 VK_STEP 逐档 build(k) 直到
+    -- 超限，最后再 build(vk) 落到真正显示的那一棵。一次重排要建 5 棵树，前 4 棵
+    -- 建完就扔（日历版式最坏 14 棵、近 4000 个 TextWidget）。改成反解之后只建 1 棵：
+    -- 直接对试排出来的那棵树拉伸空白，一次都不用重建。
+    -- 顺带解决了原代码最后那次重建要处理的副作用：buildPortrait 会把
+    -- self.clock_widget 指向当次建的控件，被否决的试探树不进控件树，时钟就刷不动了；
+    -- 现在试排的树就是最终那棵，不存在指向废树的问题。
     local vk = 1
     if bs.h <= avail_h and bs.w <= avail_w then
-        local max_i = math.floor((VK_MAX - 1) / VK_STEP + 0.5)
-        for i = 1, max_i do
-            local k = 1 + VK_STEP * i
-            local _, bs2 = build(k)
-            if bs2.h <= avail_h and bs2.w <= avail_w then
-                vk = k
-            else
-                break
+        vk = fitGapScale(body, bs.h, avail_h)
+        if vk > 1 then
+            local ok, err = pcall(stretchGaps, body, vk)
+            if not ok then
+                logger.warn("dashboard: 间距自适应失败，按原间距排版", tostring(err))
+                vk = 1
             end
         end
-        -- 必须按最终档位真正建一次：buildPortrait 会顺手把 self.clock_widget 指向
-        -- 当次建的控件，而试探过程中被否决的那一版控件不会进控件树。
-        -- 不重建的话时钟控件会指向一棵没显示的树，往后 tick 就再也刷不动时钟了。
-        body, bs = build(vk)
     end
     self.scale = S
     self.vk = vk
@@ -3992,7 +4115,7 @@ function Dashboard:buildHeader(ctx, pad_lr)
     -- 顶栏是「一眼扫过」的地带：无线状态用三段弧 + 斜杠说清（连/未连/未开），
     -- 比「未连接」三个汉字快得多，也不吃宽度。与 C 区「电量网络」同一套图标，
     -- 两处看到的图形语言是一个。
-    local net = self:netInfo()
+    local net = self:ctxNet(ctx)
     if net.wifi_on ~= nil then
         if net.wifi_on == false then
             -- v2.59：未开启改用汉字。那套「只亮内段 + 斜杠」要跟"未连接"的
@@ -4008,7 +4131,9 @@ function Dashboard:buildHeader(ctx, pad_lr)
             right_items[#right_items + 1] = mkPad(math.floor(12 * S), 1)
         end
     end
-    local cap, charging = self:batteryInfo()
+    -- 电量和网络是同一次读取的结果（netInfo 内部就调了 batteryInfo），
+    -- 这里直接用，不要为同一块顶栏再问一遍 gasgauge
+    local cap, charging = net.cap, net.charging
     if cap then
         right_items[#right_items + 1] = self:makeText(ctx, string.format("%d%%", cap), 17,
             { gray = true })
@@ -4278,7 +4403,8 @@ function Dashboard:iconBitmap(name, px, opts)
 end
 
 function Dashboard:buildZone(ctx, orient, key, box_w, content_w, box_h)
-    local id = self:getZoneLayout()[orient][key]
+    -- 三个区共用同一份配置，不要每个区都读一遍设置
+    local id = self:ctxZoneLayout(ctx)[orient][key]
     local comp = COMPONENTS[id] or COMPONENTS[ZONE_DEFAULT[orient][key]]
     local method = comp.build
     -- v2.53：盒子变成一张卡片。box_w 是卡宽，content_w 是卡内可用宽
@@ -4961,7 +5087,7 @@ end
 --- 阈值用设计单位（除以 ctx.S），换分辨率时档位不会整体错位。
 function Dashboard:compReading(ctx, w, h, k)
     local S = ctx.S
-    local info = self:readingInfo()
+    local info = self:ctxReading(ctx)
     if not info then
         return CenterContainer:new{
             dimen = Geom:new{ w = w, h = math.floor(h) },
@@ -5528,7 +5654,7 @@ end
 --- 电量网络（C 区）：电量百分比（充电中另有标注）+ WiFi 开关与连接状态
 function Dashboard:compBatteryNet(ctx, w, h, k)
     local S = ctx.S
-    local net = self:netInfo()
+    local net = self:ctxNet(ctx)
     -- 网络这格原来在 38du 的大字位上写「未连接」三个汉字：占掉半个格宽，
     -- 而且"信号弱"和"没开 WiFi"看起来一模一样。改成状态图标 ——
     --   已连接 = 三段弧 / 未连接 = 三段弧 + 斜杠。

@@ -121,6 +121,47 @@ python tools/secret_check.py --history  # 审计全部历史（慢，改完历�
   - 实测几何（KPW3 竖屏 1072×1448）：原生状态栏白底 y=32..69、文字落在 38..62、含残影
     底边齐 76；A 区卡片上边缘 110。所以 120 这条刚好盖满状态栏，只多带到卡片上方那 10 px
     白边。传 region 还有个附带好处：v2.65 的转屏静音只吞「覆盖整屏」的刷新，这条不会被吞。
+- **一次重排只建一棵树**（v2.68）：`createRoot()` 原来要建 5 棵——1 棵试排、最多 15 棵
+  逐档放大空白（每档一次 `build(k)`）、最后再建 1 棵落到真正显示的那版，前几棵建完就扔。
+  但总高对 `vk` 是**线性**的：`stretchGaps` 只把顶层 `is_gap` 行的 `h` 乘以 `vk`，字号、
+  宽度、别的行都不动，所以 `总高(k) = 固定部分 + Σ floor(该行原高 × k)`。量一次反解出
+  最大档位（`fitGapScale`），直接对试排出来的那棵树拉伸，一棵都不必重建。
+  - 桩件实测：竖屏 PW3 上 `builds` 从 5 降到 1（要缩字号的尺寸是 2）；`vk` 与原试探算法
+    逐档一致——横竖屏 × 四种尺寸共五种组合，1.00 / 1.05 / 1.10 / 1.50 / 1.75 全对。
+  - 取整必须逐行 `floor` 累加，不能拿「平均高 × 行数」估：十几行各向下取整，累计能差出
+    几十像素，估出来的档位会撑破版心。
+  - 顺带修掉原代码最后那次重建要处理的副作用：`buildPortrait` 会把 `self.clock_widget`
+    指向当次建的控件，被否决的试探树不进控件树，时钟就再也刷不动；现在试排的树就是终版。
+- **一次重排只读一次数据**（v2.68）：`ctx` 上挂三个按轮缓存——`ctxNet` / `ctxZoneLayout` /
+  `ctxReading`。原来顶栏与 C 区各调一次 `netInfo`，而 `netInfo` 内部又调一次 `batteryInfo`；
+  `buildZone` 三个区各读一遍分区配置。实测每次重排的调用次数：
+
+  | 读取 | 原来 | 现在 | 代价 |
+  |---|---|---|---|
+  | `netInfo`（含 WiFi/连接状态） | 5 | 1 | NetworkMgr 调用 |
+  | `batteryInfo` | 10 | 1 | 问 gasgauge / 读 sysfs |
+  | `getZoneLayout` | 15 | 1~2 | 读设置 + 校验 2×3 个组件 |
+  | `readingInfo` | 5 | 0~1 | 开 sidecar 读盘 |
+
+  缓存只活一次重排（`ctx` 在 `createRoot` 里新建）；菜单勾选、`setZoneComponent` 这类
+  非渲染调用照旧现读，改完配置立刻生效。
+- **退出看板要把方向转回去，而且必须通知阅读页重排**（v2.68）：`close()` 原来只调
+  `Screen:setRotationMode`，但「按新尺寸重排」是 `ReaderView:onSetRotationMode → rotate()`
+  里做的（`SetDimensions → recalculate`）。绕过它 ReaderView 根本收不到通知：屏幕已经竖了、
+  正文还按横屏排，挤在左上，得等三四秒某个迟到的事件才自愈。
+  现在走 `restoreRotation()`，与 `rotateScreen()` 同一个入口（`ui.view:onSetRotationMode`
+  → `ui:onSetRotationMode` → 直调 `Screen` 三级降级）。走事件入口时重排是**同步**完成的，
+  事件返回时版面已经对了，所以「等重排完再刷」= 「事件返回后再刷」。
+- **`close()` 的刷新要按三种情况分开**（v2.68）：`restoreRotation()` 返回三态，
+  只有 `"event"` 才不用自己刷（`ReaderView:rotate()` 里已经 `setDirty(nil, "full")`）：
+  - `"event"` —— 方向真的变了，重排同步完成并已排好整屏刷新，`close()` 什么都别做；
+  - `"noop"` —— 方向本来就是对的（看板「横屏」在有些路径下只是换版式，屏幕从没转过去）。
+    `ReaderView:onSetRotationMode` 判定 `mode == old_mode` **直接返回，一个 setDirty 都不发**，
+    而这时 root 刚被撤掉，不补刷屏幕就停在看板那一帧，看着像「根本没退出」。必须自己补一帧；
+  - `"direct"` —— 只改了 `Screen`，重排没被通知到：先补一帧过渡，0.6 秒后再补一帧把它
+    重排后的结果顶上去。
+  「`noop` 也要刷」这条是上机才发现的：桩件里 `Screen:setRotationMode` 是真的改 rotation，
+  永远走 `"event"`，抓不到这个分支。
 - 月历默认在横屏 B 区：周一起始、跨月补位（灰字）、今天反白、节气日带点。竖屏 B 区也能装，
   格宽按盒宽自适应。
 
@@ -779,9 +820,27 @@ python tools/audit_align.py    # 对齐审计（读 preview/ 下的图，不用�
 | 两步录入 | 真按一遍保存与日期选择：默认今天、名称夹日期预填、空名称被挡下 |
 | 在读卡 | 三种书型（活文档 / 缺进度 / 仅侧车）；封面缓存首次开书 1 次、二次不再开 |
 | 生命周期 | 7 种尺寸方向组合下控件栈、定时器、待机抑制计数全部归零 |
+| 重排开销 | 一次重排建树次数恒为 1（要缩字号的尺寸是 2，原来固定 5）；`vk` 反解结果与旧的逐档试探算法在五种尺寸组合上完全一致 |
+| 退出看板 | 方向还原到打开前，且 `ReaderView:onSetRotationMode` 收到一次通知；把 `close()` 改回直调 `Screen` 会立刻 FAIL |
 | 城市与时区数据 | 81 个城市名唯一、坐标未越界、group 均在分组表中；47 个海外城市的 `tz` 全部能在 43 个时区里查到（查不到会静默回落成北京时间） |
 | 夏令时 | EU/US/AU/NZ/CL 各取冬夏两天的偏移，12 个时刻全部吻合 |
 | 海外与定位 | 选伦敦自动带 `Europe/London`、选北京不覆盖已选时区；定位失败不动设置、成功选中纽约并同步 `America/New_York` |
+
+### 上机验收的三个坑
+
+1. **探针里不要用 `os.execute("sleep")` 等刷新**。KOReader 的刷屏走 `UIManager:repaint`
+   主循环，`setDirty` 只是把请求塞进 `_refresh_stack`（uimanager.lua:1210）。探针里 sleep
+   期间主循环是停的，这时抓 `/dev/fb0` 拿到的一定是上一帧——看着像「刷新没生效」，
+   其实只是还没轮到刷。要么用外部的 `kindle.py shot`（独立进程，不挡主循环），
+   要么让探针直接返回、下一次再抓。
+2. **重启 KOReader 只有 `UIManager:quit(85)` 一条干净路径**（`koreader.sh:329` 只认退出码 85）。
+   从 SSH 侧 `kill -TERM reader.lua` 不会触发那个重启循环，旧进程还可能不退出；
+   这时再手工起一个 `koreader.sh`，就会得到**两组实例同时抢 framebuffer**——表现为画面
+   被转了 90°、截图忽新忽旧、`pidof` 里出现六个进程。先确认 `pidof reader.lua` 只有一组，
+   要清场就整组 `kill -9`，再用 `setsid /mnt/us/koreader/koreader.sh` 重新拉起。
+3. **devbridge 只在 KOReader 启动时加载**。拷进 `plugins/` 之后必须重启才生效；反过来，
+   把它移走而不重启，内存里的实例还在跑——所以撤插件之前可以先发一次 `restart`，
+   那是自己给自己铺的最后一条路。
 
 尚未上机确认的只有三条：`lipc-set-prop` 是否在 KOReader 进程 PATH 内、`ffi` 能否加载 libz
 成功解压、转屏的实际刷新观感。三者失败都有明确降级，不会连带把看板弄崩。
@@ -809,6 +868,7 @@ python tools/audit_align.py    # 对齐审计（读 preview/ 下的图，不用�
 | 按电源键毫无反应 | 先确认屏幕是不是本来就在显示看板（那是正常的）；若唤醒后仍没反应，看 `crash.log` 里有没有 `preventScreenSaver`，可执行 `lipc-set-prop -i com.lab126.powerd preventScreenSaver 0` 恢复 |
 | 唤醒后卡住几秒到几十秒 | 唤醒瞬间在同步拉天气。本版已加 25 秒宽限期 |
 | 唤醒后时钟停在睡前 | 看 `crash.log` 有没有「唤醒处理失败」 |
+| 退出看板后三四秒正文还挤在左上 | ReaderView 没收到重排通知。v2.68 起 `close()` 走 `ui.view:onSetRotationMode`，重排是同步的；仍出现就看 `crash.log` 有没有「恢复方向失败」，或当前界面根本没有 `ui.view`（书架/文件管理器）——那种情况退回直调 `Screen` 并延时补一刷 |
 | 顶栏压着一条「上午 1:15 80%」 | Kindle 原生状态栏落在首绘之后。v2.67 会延时 0.9 秒只刷顶部一条擦掉；仍出现先看是不是栈顶有弹窗（那种情况会主动跳过），或者截图抢在 0.9 秒之前 |
 | 休眠后屏幕停在菜单上 | 本版会在休眠前先撤菜单；仍有则看 `crash.log` 里「屏保接管失败」 |
 | 温度一直是 `--°` | 菜单「天气服务 → 测试连接」看报错；`401` 多为 Key/Host 不匹配 |

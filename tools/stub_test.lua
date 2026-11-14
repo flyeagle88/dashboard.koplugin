@@ -1081,6 +1081,18 @@ EVENTS[#EVENTS + 1] = "== gzip 解压链路已接管（非 gzip 直通分支已�
 instance = plugin:new{}
 instance.path = plugin_dir
 instance.ui = { menu = { registerToMainMenu = function() end } }
+-- v2.68：ReaderView 的 onSetRotationMode（真机 readerview.lua:892）。
+-- 它做的事是「方向真的变了才调 Screen:setRotationMode，然后 SetDimensions → 重排」，
+-- 这里如实复现前半段并计数，用来断言退出看板时阅读页的重排确实被通知到了。
+STUB_ROT_NOTIFY = 0
+instance.ui.view = {}
+function instance.ui.view:onSetRotationMode(mode)
+    local old = screen.getRotationMode and screen.getRotationMode() or 0
+    if mode ~= nil and mode ~= old then
+        if screen.setRotationMode then screen.setRotationMode(screen, mode) end
+        STUB_ROT_NOTIFY = STUB_ROT_NOTIFY + 1
+    end
+end
 -- 版式方向可以由外部强制（验证「竖屏屏幕跑横屏版式」这类不匹配组合）
 if _G.STUB_FORCE_LAYOUT == "landscape" then
     instance.force_landscape = true
@@ -2463,6 +2475,18 @@ ctx_m.lunar = Lunar2.solar_to_lunar(ctx_m.now.year, ctx_m.now.month, ctx_m.now.d
 ctx_m.cur_term, ctx_m.next_term = Lunar2.current_term(ctx_m.now.year, ctx_m.now.month,
     ctx_m.now.day, ctx_m.tz.offset)
 
+--- 生产代码每次重排都新建一份 ctx，而 v2.68 的 ctx 缓存（电量/分区配置/在读信息）
+--- 只活这一轮。桩件这里长期复用同一个 ctx_m 来模拟多次构建，所以每次构建前要把
+--- 这一轮的缓存清掉，否则第二次构建会拿到上一轮的电量和在读信息，
+--- 测出来的就不是真实行为了（在读卡的书名断言就是被这个假象坑到的）。
+-- 用全局函数而不是 local：主 chunk 的 local 上限是 200，已经用满了
+function fresh_ctx_m()
+    ctx_m.net = nil
+    ctx_m.zone_layout = nil
+    ctx_m.reading = nil
+    return ctx_m
+end
+
 -- v2.53：盒子里套一层卡片，组件能用的高/宽都要先扣掉卡片内边距（card_pad）。
 -- 这里跟 buildZone 用同一份 spec 与同一个算法，改了一边另一边不会偷偷跑偏。
 local function matrixBox(orient, key)
@@ -2500,7 +2524,7 @@ for id, comp in pairs(instance:componentRegistry()) do
         m_total = m_total + 1
         local box_w, box_h, content_w = matrixBox(orient_m, key)
         local okc, child = pcall(function()
-            return instance[comp.build](instance, ctx_m, content_w, box_h, 1)
+            return instance[comp.build](instance, fresh_ctx_m(), content_w, box_h, 1)
         end)
         if not okc then
             m_fail[#m_fail + 1] = string.format("%s@%s/%s 构建异常: %s",
@@ -2512,7 +2536,7 @@ for id, comp in pairs(instance:componentRegistry()) do
             else
                 local fitted, last_why = nil, why
                 for i = 2, #ladder do
-                    local c2 = instance[comp.build](instance, ctx_m, content_w, box_h, ladder[i])
+                    local c2 = instance[comp.build](instance, fresh_ctx_m(), content_w, box_h, ladder[i])
                     last_why = unfit(c2, box_h, content_w)
                     if last_why == "" then fitted = ladder[i] break end
                 end
@@ -2688,19 +2712,19 @@ do
         print("[FAIL] 只读 10 秒时不该有任何一栏有值")
         os.exit(1)
     end
-    if instance:readingStatRow(ctx_m, 600, 1, tiny) ~= nil then
+    if instance:readingStatRow(fresh_ctx_m(), 600, 1, tiny) ~= nil then
         print("[FAIL] 三栏全空时应返回 nil（整行不画）")
         os.exit(1)
     end
-    if instance:readingStatRow(ctx_m, 600, 1, f0) ~= nil then
+    if instance:readingStatRow(fresh_ctx_m(), 600, 1, f0) ~= nil then
         print("[FAIL] 统计库缺失时三栏应整行不画（返回 nil）")
         os.exit(1)
     end
-    if not instance:readingStatRow(ctx_m, 600, 1, f2) then
+    if not instance:readingStatRow(fresh_ctx_m(), 600, 1, f2) then
         print("[FAIL] 读了 3 分钟时应至少画出「累计」一栏")
         os.exit(1)
     end
-    if not instance:readingStatRow(ctx_m, 600, 1, f1) then
+    if not instance:readingStatRow(fresh_ctx_m(), 600, 1, f1) then
         print("[FAIL] 样本足够时三栏应正常画出")
         os.exit(1)
     end
@@ -2710,7 +2734,7 @@ end
 local long_title = "一个特别特别长的书名用来测试省略号是不是真的生效以及不会把版面顶破"
 instance.ui.doc_settings = fake_ds(long_title, "某作者", 500, 0.33)
 local box_w_r, box_h_r, content_w_r = matrixBox(orient_m, orient_m == "portrait" and "B" or "C")
-local card = instance:compReading(ctx_m, content_w_r, box_h_r, 1)
+local card = instance:compReading(fresh_ctx_m(), content_w_r, box_h_r, 1)
 local cs_r = card:getSize()
 if cs_r.h > box_h_r or cs_r.w > content_w_r + 1 then
     print(string.format("[FAIL] 在读卡超出盒子：%dx%d > %dx%d", cs_r.w, cs_r.h, content_w_r, box_h_r))
@@ -2755,7 +2779,7 @@ if _G.STUB_SETTINGS_DIR then
     _G.COVER_OPENS = 0
     _G.STUB_COVER_MODE = "demo"
 
-    local card_c = instance:compReading(ctx_m, content_w_r, box_h_r, 1)
+    local card_c = instance:compReading(fresh_ctx_m(), content_w_r, box_h_r, 1)
     local img = find_image(card_c)
     if not img then
         print("[FAIL] 在读卡没有画出封面（控件树里找不到 ImageWidget）")
@@ -2781,7 +2805,7 @@ if _G.STUB_SETTINGS_DIR then
     end
 
     -- 第二次：缓存命中，不该再打开书
-    local card_c2 = instance:compReading(ctx_m, content_w_r, box_h_r, 1)
+    local card_c2 = instance:compReading(fresh_ctx_m(), content_w_r, box_h_r, 1)
     local img2 = find_image(card_c2)
     local opens_second = _G.COVER_OPENS or 0
     if not img2 or img2.file ~= img.file then
@@ -2796,7 +2820,7 @@ if _G.STUB_SETTINGS_DIR then
     -- 换一本没有封面的书：不该画封面，也不该把卡片搞崩
     G_reader_settings:saveSetting("lastfile", "/mnt/us/documents/没有封面的书" .. run_id .. ".epub")
     _G.STUB_COVER_MODE = "none"
-    local card_n = instance:compReading(ctx_m, content_w_r, box_h_r, 1)
+    local card_n = instance:compReading(fresh_ctx_m(), content_w_r, box_h_r, 1)
     if find_image(card_n) then
         print("[FAIL] 书上没有封面，卡片却画出了封面位")
         os.exit(1)
@@ -2817,7 +2841,7 @@ if _G.STUB_SETTINGS_DIR then
     G_reader_settings:saveSetting("lastfile", "/mnt/us/documents/打不开的书" .. run_id .. ".epub")
     _G.STUB_COVER_MODE = "unopenable"
     local ok_u, card_u = pcall(function()
-        return instance:compReading(ctx_m, content_w_r, box_h_r, 1)
+        return instance:compReading(fresh_ctx_m(), content_w_r, box_h_r, 1)
     end)
     if not ok_u or not card_u then
         print("[FAIL] 打不开书时在读卡直接报错了：" .. tostring(card_u))
@@ -3111,7 +3135,7 @@ local function check_agenda()
                 local _, box_h2, content_w2 = matrixBox(orient2, key2)
                 local fitted = false
                 for i = 1, #ladder do
-                    local c2 = instance[comp2.build](instance, ctx_m, content_w2, box_h2, ladder[i])
+                    local c2 = instance[comp2.build](instance, fresh_ctx_m(), content_w2, box_h2, ladder[i])
                     local sz = c2:getSize()
                     if sz.h <= box_h2 and sz.w <= content_w2 + 1 then
                         fitted = true
@@ -3408,6 +3432,81 @@ if SW == 1072 and SH == 1448 then
     EVENTS[#EVENTS + 1] = string.format(
         "== 月历列距：竖屏 格宽 %d + 列距 %d = %d/920，横屏 格宽 %d 铺满 644 ==",
         cw_p, gap_p, p_total, cw_l)
+end
+
+-- v2.68：退出看板时方向要转回去，而且必须**通知阅读页重排**。
+-- 以前 close 只调 Screen:setRotationMode，ReaderView 收不到 SetDimensions，
+-- 于是屏幕已经竖了、正文还按横屏排（挤在左上），要等三四秒某个迟到事件才自愈。
+if not _G.STUB_NO_ROTATION then
+    local saved_orient = G_reader_settings:readSetting("dashboard_orientation")
+    for i = #timers, 1, -1 do
+        if timers[i].delay and math.abs(timers[i].delay - 0.9) < 0.05 then
+            table.remove(timers, i)
+        end
+    end
+    instance.orientation_mode = nil
+    instance:open()
+    local base_before = instance.base_rotation
+    local turned = instance:setOrientation("landscape")
+    if turned and screen.getRotationMode() ~= base_before then
+        STUB_ROT_NOTIFY = 0
+        instance:close()
+        if screen.getRotationMode() ~= base_before then
+            print(string.format("[FAIL] 退出看板没把方向转回去：%s != %s",
+                tostring(screen.getRotationMode()), tostring(base_before)))
+            os.exit(1)
+        end
+        if STUB_ROT_NOTIFY == 0 then
+            print("[FAIL] 退出看板只改了 Screen，没通知阅读页重排（会停在横屏版式）")
+            os.exit(1)
+        end
+        EVENTS[#EVENTS + 1] = "== 退出看板：方向已还原，且 ReaderView 收到重排通知 =="
+
+        -- 还有一条更隐蔽的路：rotation_changed 是 true，但 close 那一刻 Screen 已经
+        -- 被别处复位成 base 了（v2.57 的注释里就记过「refreshLayout 时已经复位」）。
+        -- 这时 ReaderView:onSetRotationMode 判定 mode == old_mode 直接返回，
+        -- 一个 setDirty 都不会发——屏幕就停在看板那一帧，用户以为没退出。
+        instance:open()
+        instance.base_rotation = base_before
+        STUB_ROT_NOTIFY = 0
+        instance:setOrientation("landscape")
+        screen.setRotationMode(screen, base_before)
+        local dirty_before = #STUB_DIRTY_CALLS
+        instance:close()
+        local repainted = false
+        for i = dirty_before + 1, #STUB_DIRTY_CALLS do
+            if STUB_DIRTY_CALLS[i] == "full" then repainted = true end
+        end
+        if not repainted then
+            print("[FAIL] 方向已被复位时退出看板没有重绘，屏幕会停在看板那一帧")
+            os.exit(1)
+        end
+        EVENTS[#EVENTS + 1] = "== 退出看板（方向已被复位）：仍然推了一帧 full，不会停在看板画面 =="
+    end
+    G_reader_settings:saveSetting("dashboard_orientation", saved_orient)
+end
+
+-- v2.68：一次重排只建一棵树。用 buildZone 的调用次数当探针：一棵树固定 3 次
+-- （三个区各一次），退回「建 5 棵树试探」会变成 15 次。要缩字号的尺寸最多 2 棵。
+do
+    local calls = 0
+    local orig_bz = instance.buildZone
+    instance.buildZone = function(self2, ...)
+        calls = calls + 1
+        return orig_bz(self2, ...)
+    end
+    local ok2, err2 = pcall(function() instance:createRoot() end)
+    instance.buildZone = orig_bz
+    if not ok2 then
+        print("[FAIL] createRoot 失败：" .. tostring(err2))
+        os.exit(1)
+    end
+    if calls > 6 then
+        print(string.format("[FAIL] 一次重排建了 %d 棵树（buildZone 调了 %d 次），应该只建 1~2 棵",
+            calls / 3, calls))
+        os.exit(1)
+    end
+    EVENTS[#EVENTS + 1] = string.format("== 一次重排只建 %d 棵树（buildZone 调用 %d 次） ==", calls / 3, calls)
 end
 
 print("---------- 事件序列 ----------")
