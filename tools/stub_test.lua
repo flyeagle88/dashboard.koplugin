@@ -1584,6 +1584,95 @@ do
     end
 end
 
+-- v2.69：会话里的**第一次**开板要整屏确认一次。
+-- 冷启动那条路径上「首绘那一刷没落地」+「只补顶部一条」= 屏幕上只剩
+-- 「上面看板、下面阅读页」，而且会一直停在那儿，得手动全刷才恢复。
+do
+    instance:close()
+    instance._painted_once = nil
+    for i = #timers, 1, -1 do
+        if timers[i].delay and math.abs(timers[i].delay - 0.9) < 0.05 then
+            table.remove(timers, i)
+        end
+    end
+    STUB_LAST_FULL_REGION = "unset"
+    instance:open()
+    local mark = #STUB_DIRTY_CALLS
+    local fired = 0
+    for i = #timers, 1, -1 do
+        local t = timers[i]
+        if t.delay and math.abs(t.delay - 0.9) < 0.05 then
+            table.remove(timers, i)
+            t.fn()
+            fired = fired + 1
+        end
+    end
+    if fired == 0 then
+        print("[FAIL] 会话首次开板没有补刷")
+        os.exit(1)
+    end
+    local got_full = false
+    for i = mark + 1, #STUB_DIRTY_CALLS do
+        if STUB_DIRTY_CALLS[i] == "full" then got_full = true end
+    end
+    if not got_full then
+        print("[FAIL] 会话首次开板没有发出整屏 full（首绘那一刷丢了就会停在半新半旧）")
+        os.exit(1)
+    end
+    if STUB_LAST_FULL_REGION ~= nil then
+        local r = STUB_LAST_FULL_REGION
+        print(string.format("[FAIL] 会话首次开板的补刷只擦了 %sx%s，应当整屏",
+            tostring(r and r.w), tostring(r and r.h)))
+        os.exit(1)
+    end
+    EVENTS[#EVENTS + 1] = "== 会话首次开板：补刷升级为整屏 full =="
+end
+
+-- v2.69：静音窗口里整屏那一刷没发出去时，补刷也要自己升级成整屏。
+do
+    instance:close()
+    instance._painted_once = true
+    for i = #timers, 1, -1 do
+        if timers[i].delay and math.abs(timers[i].delay - 0.9) < 0.05 then
+            table.remove(timers, i)
+        end
+    end
+    instance:open()
+    -- 模拟：静音还开着，而 refreshLayout 那次整屏 full 没落地
+    instance._mute_full = true
+    instance._own_painted = false
+    STUB_LAST_FULL_REGION = "unset"
+    local mark = #STUB_DIRTY_CALLS
+    local fired = 0
+    for i = #timers, 1, -1 do
+        local t = timers[i]
+        if t.delay and math.abs(t.delay - 0.9) < 0.05 then
+            table.remove(timers, i)
+            t.fn()
+            fired = fired + 1
+        end
+    end
+    instance._mute_full = nil
+    instance._own_painted = nil
+    if fired == 0 then
+        print("[FAIL] 静音场景下没有补刷")
+        os.exit(1)
+    end
+    if STUB_LAST_FULL_REGION ~= nil then
+        print("[FAIL] 静音窗口里整屏没刷出去时，补刷仍是顶部一条——屏幕会停在半新半旧")
+        os.exit(1)
+    end
+    local got_full2 = false
+    for i = mark + 1, #STUB_DIRTY_CALLS do
+        if STUB_DIRTY_CALLS[i] == "full" then got_full2 = true end
+    end
+    if not got_full2 then
+        print("[FAIL] 静音场景的补刷没有发出 full")
+        os.exit(1)
+    end
+    EVENTS[#EVENTS + 1] = "== 静音窗口里整屏没刷出去：补刷自动升级为整屏 =="
+end
+
 -- 顶部下滑 -> 打开看板自己的菜单；左右滑动 -> 重新布局
 local root2 = instance.root
 local down_zone, side_zone

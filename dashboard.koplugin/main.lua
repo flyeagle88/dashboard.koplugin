@@ -171,7 +171,7 @@ local TOP_STRIP_DELAY = 0.9
 -- 版本号：显示在菜单「使用说明」那一项上。改动行为后一定同步改这里，
 -- 上机时一眼就能确认「装的到底是不是刚改的这份」（避免文件没覆盖到、
 -- 或者覆盖了但 KOReader 没重启，还在跑内存里的旧模块）。
-local DASHBOARD_VERSION = "2.68"
+local DASHBOARD_VERSION = "2.69"
 
 -- 唤醒宽限期：刚醒来的这几秒里先不拉天气。http.TIMEOUT 是 20 秒，三个接口
 -- 外加 LuaSec/socket.http 双通道，最坏能同步卡住一两分钟；而休眠之后天气必然过期，
@@ -1751,8 +1751,15 @@ end
 --- 推一遍，内容取自 bb（此刻已经是看板自己画的），所以能擦掉屏幕上的旧像素；
 --- 而整屏补刷等于让整个画面再闪一下——为了擦一条 120px 的状态栏付这个代价没必要。
 --- 传 region 还有个附带好处：v2.65 的转屏静音只吞「覆盖整屏」的刷新，这条不会被吞。
-function Dashboard:brushTopStrip(delay)
+---
+--- v2.69：这个补刷有两个「必须整屏」的例外，靠 opts.full 或自动判定触发——
+--- 只补顶部一条的前提是「整屏已经刷过一次」，一旦那一刷没落到屏幕上，
+--- 补一条就只剩下「上面是看板、下面还是阅读页」的半新半旧，而且会一直停在那儿。
+---   · 本次会话的第一次开板（opts.full）—— 首绘那一刷在冷启动路径上不可靠；
+---   · 转屏静音窗口里发现整屏一次都没刷出去（_mute_full 且 _own_painted 为假）。
+function Dashboard:brushTopStrip(delay, opts)
     if not UIManager or not Screen then return end
+    local full = opts and opts.full
     UIManager:scheduleIn(delay or TOP_STRIP_DELAY, function()
         if not self.shown or not self.root then return end
         -- 只在看板是「最上面那层」时动手：paintTo 会覆盖整块 bb，栈上若有弹窗
@@ -1761,6 +1768,11 @@ function Dashboard:brushTopStrip(delay)
         local stack = UIManager._window_stack
         local top = stack and stack[#stack] and stack[#stack].widget
         if top and top ~= self.root and top.text then return end
+        -- 静音窗口还开着、而整屏那一刷并没有真的发出去：这次补刷必须整屏，
+        -- 否则屏幕会停在半新半旧上（转屏后再也不会自己好）。
+        if not full and self._mute_full and not self._own_painted then
+            full = true
+        end
         local w, h = Screen:getWidth(), Screen:getHeight()
         -- 关键：只「刷新」不「重绘」擦不掉。Kindle 的 bb 与 fb0 共用同一块内存，
         -- framework 的状态栏是直接写进 bb 的——那条区域此刻已经脏了，再拿它刷只是
@@ -1768,9 +1780,16 @@ function Dashboard:brushTopStrip(delay)
         -- 所以先重绘 root（纯内存 blit，几十毫秒），让 bb 顶部恢复成看板自己的内容，
         -- 再只刷这一条：屏幕只闪这一条，其余区域一动不动。
         pcall(function() self.root:paintTo(Screen.bb, 0, 0) end)
-        UIManager:setDirty(nil, "full", Geom:new{
-            x = 0, y = 0, w = w, h = math.min(TOP_STRIP_HEIGHT, h),
-        })
+        -- _own_full：整屏那一刷要能穿过转屏静音窗口，那是看板唯一该刷的一刷。
+        self._own_full = full or nil
+        if full then
+            UIManager:setDirty(nil, "full")
+        else
+            UIManager:setDirty(nil, "full", Geom:new{
+                x = 0, y = 0, w = w, h = math.min(TOP_STRIP_HEIGHT, h),
+            })
+        end
+        self._own_full = nil
     end)
 end
 
@@ -1830,7 +1849,15 @@ function Dashboard:open()
     self:fetchWeather()
     self:scheduleTick()
     -- 首绘完成后补擦顶部一条（Kindle 原生状态栏常在这一刻之后才写上来）
-    self:brushTopStrip()
+    --
+    -- v2.69：**本次会话的第一次开板**改成整屏确认一次。冷启动路径上首绘那一刷
+    -- 不一定落到屏幕上（转屏静音吞掉 / 底层界面迟到的一刷盖回来），而这时只补
+    -- 顶部一条，屏幕上就只剩「上面看板、下面阅读页」——而且会一直停在那儿，
+    -- 得手动全刷一次才恢复。整屏那一刷只在会话首次付出（多闪一下），
+    -- 之后各次开板、唤醒仍是只擦顶部。
+    local first_paint = not self._painted_once
+    self._painted_once = true
+    self:brushTopStrip(nil, { full = first_paint })
     self:maybeShowSetupHint()
 end
 
@@ -2018,7 +2045,12 @@ function Dashboard:renderSaverFrame()
     end
     self.saver_root = root
     UIManager:show(root)
+    -- _own_full：休眠屏保这一帧是**唯一**该刷的一帧，转屏静音窗口若还开着
+    -- （用户刚开完板就按电源键）绝不能把它吞掉——休眠期间主循环不跑，
+    -- 吞掉了就没有第二次机会，屏幕上会停在「上面看板、下面阅读页」。
+    self._own_full = true
     UIManager:setDirty(root, "full")
+    self._own_full = nil
     -- 挂起紧跟着就发生，必须在这里同步刷完，否则屏幕还停在旧画面上
     pcall(function() UIManager:forceRePaint() end)
 end
