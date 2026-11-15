@@ -38,8 +38,9 @@ dashboard_config.local.lua（或菜单「天气服务」）里填写 API Host �
 
 看板打开之后的状态机（每一条都已按 KOReader 上游源码核对）：
   触摸            点按刷新天气；上划退出；左右滑切版式；上缘下滑开菜单
-  空闲但未超时      按「时钟刷新」粒度只重画时钟那一块（默认 5 分钟），全刷按周期清残影
-                    （默认 60 分钟）；两项都可在菜单「显示与省电 → 省电设置」里改
+  空闲但未超时      按「时钟刷新」粒度只重画时钟那一块（默认 5 分钟），
+                    清残影按周期做（默认 180 分钟，v2.70 起默认不整屏反白）；
+                    两项都可在菜单「显示与省电 → 省电设置」里改
   空闲超时 / 按电源键  powerd → Device:intoScreenSaver() → Screensaver.show 被我们接管
                      → 屏幕保持看板 → powerd:beforeSuspend() 真正挂起（CPU 停）
                      所以「按电源键屏幕没变化」是正常的：它本来就在显示看板
@@ -115,23 +116,66 @@ local COLOR_WHITE = Blitbuffer.COLOR_WHITE
 -- COLOR_DARK_GRAY 在个别老版本上可能不存在，退化成黑色而不是崩掉
 local COLOR_GRAY = Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_BLACK
 
--- 墨阶（v2.53）。全部取 17 的倍数：Carta 面板把任何灰度 floor 到 17 的倍数，
+-- 墨阶（v2.53 起，v2.78 改成两套可切换的风格）。
+-- 所有灰阶都取 17 的倍数：Carta 面板把任何灰度 floor 到 17 的倍数，
 -- 写 0xE6 出来就是 0xDD、写 0xF2 出来是 0xEE。实测见 device-tools/calib/RESULTS.md。
---   PAPER  0xEE  纸底。比纯白低一档，大面积铺开像微微泛灰的纸，不刺眼
---   CARD   0xFF  卡面。正文/数值都落在白卡上，对比度才够
---   RULE   0xCC  卡片边框、进度槽。落在 0xEE 纸底上仍是 2 档差，1px 看得见
---   RULE_SOFT 0xDD 白卡内的细分隔线（白底 1px 可见下限）
---   INK2   0x66  三级文字：标签、注释、单位
---   INK3   0x88  最浅文字，只在 ≥30px（17 设计单位）时用，再小就发虚
-local PAPER     = Blitbuffer.COLOR_GRAY_E or Blitbuffer.COLOR_WHITE
-local RULE      = Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_GRAY
-local RULE_SOFT = Blitbuffer.COLOR_GRAY_D or Blitbuffer.COLOR_GRAY
+--
+-- **为什么要有「报纸黑白风」**（用户实测反馈：刷新时黑闪只出现在非黑非白的区域）：
+--   E Ink 一次提交会把**这块区域里每个像素**都走一遍波形，驱动并不区分「这个像素
+--   其实没变」。0xEE / 0xCC 这类中间灰要让粒子精确停在某个电位，波形必须多帧调制
+--   而且会过冲（先冲深再回正），整片灰底一起重排，看上去就是"整块暗一下"。
+--   纯白是稳态锚点，白→白几乎不动 —— 于是只剩黑字黑线在变，范围小、不刺眼。
+--   反过来**不能大面积铺纯黑**：黑↔白位移最大，翻过来最跳。所以报纸风是
+--   "白底黑字"，不是"黑底白字"。
+--
+--   "card"  浅灰卡片风（默认）：0xEE 纸底 + 0xFF 白卡 + 灰线，层次靠白卡与纸底的差
+--   "paper" 报纸黑白风：0xFF 纯白底 + 0x00 黑框黑字，全屏只有两阶
+--
+-- 声明成**变量**而不是 local 常量：菜单切换后要立刻生效，而所有绘制函数在运行时
+-- 读这些 upvalue，重新赋值就够了，不用重建任何控件。
+local COLOR_PAPER     = Blitbuffer.COLOR_GRAY_E or Blitbuffer.COLOR_WHITE
+local COLOR_RULE      = Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_GRAY
+local COLOR_RULE_SOFT = Blitbuffer.COLOR_GRAY_D or Blitbuffer.COLOR_GRAY
 -- 卡片边：比 RULE 深一档。0xCC 落在 0xEE 纸底上只有 2 档差，300ppi 的 1px 线太飘；
 -- 0xBB 是 3 档，边"立"得住，又远没到黑线那种切断版面的程度。
-local CARD_EDGE = Blitbuffer.COLOR_GRAY_B or RULE
-local INK1      = Blitbuffer.COLOR_GRAY_3 or Blitbuffer.COLOR_BLACK
-local INK2      = Blitbuffer.COLOR_GRAY_6 or Blitbuffer.COLOR_BLACK
-local INK3      = COLOR_GRAY
+local COLOR_CARD_EDGE = Blitbuffer.COLOR_GRAY_B or Blitbuffer.COLOR_LIGHT_GRAY
+    or Blitbuffer.COLOR_GRAY
+local COLOR_INK1      = Blitbuffer.COLOR_GRAY_3 or Blitbuffer.COLOR_BLACK
+local COLOR_INK2      = Blitbuffer.COLOR_GRAY_6 or Blitbuffer.COLOR_BLACK
+local COLOR_INK3      = COLOR_GRAY
+
+local STYLE_CARD  = "card"
+local STYLE_PAPER = "paper"
+local ui_style    = STYLE_CARD
+-- TRACK 单拎出来：它是「比例条的槽底」（填充用），不是一个线条颜色。
+-- 报纸风下若沿用 RULE_SOFT(黑)，槽底与黑色填充同色，整条全黑看不出比例 ——
+-- 所以报纸风的槽底取纯白（等于空槽），黑色只留给填充。
+local PAPER, RULE, RULE_SOFT, CARD_EDGE, INK1, INK2, INK3, TRACK
+
+local function applyUiStyle(name)
+    ui_style = (name == STYLE_PAPER) and STYLE_PAPER or STYLE_CARD
+    if ui_style == STYLE_PAPER then
+        PAPER     = COLOR_WHITE
+        RULE      = COLOR_BLACK
+        RULE_SOFT = COLOR_BLACK
+        CARD_EDGE = COLOR_BLACK
+        TRACK     = COLOR_WHITE
+        INK1      = COLOR_BLACK
+        INK2      = COLOR_BLACK
+        INK3      = COLOR_BLACK
+    else
+        PAPER     = COLOR_PAPER
+        RULE      = COLOR_RULE
+        RULE_SOFT = COLOR_RULE_SOFT
+        CARD_EDGE = COLOR_CARD_EDGE
+        TRACK     = COLOR_RULE_SOFT
+        INK1      = COLOR_INK1
+        INK2      = COLOR_INK2
+        INK3      = COLOR_INK3
+    end
+end
+-- 先按默认风格把 upvalue 填上：模块加载到 init() 之间若有人绘制，不能是 nil
+applyUiStyle(STYLE_CARD)
 
 -- 衬线字体：设备上 NotoSerif-Regular.ttf 只有拉丁字形，中文会回退到黑体。
 -- 所以**只给纯数字串**用，且同一行不能有汉字（否则一行里两种字形打架）。
@@ -157,21 +201,72 @@ local POWER_KEYS = {
 
 local TICK_STEP = 5                  -- 时钟刷新粒度（分钟）
 local UPDATE_INTERVAL = 60 * 60      -- 天气拉取间隔（秒）
-local FULL_REFRESH_PERIOD = 60       -- 全刷周期（分钟），清残影
+-- v2.70：这项的语义从「整屏闪一次的周期」改成「清残影的周期」。
+-- 真正的整屏反白（full 波形）不再按这个周期发生，默认走「轻度」全屏 REAGL ——
+-- 同样是整屏推一遍、同样能吃掉残影，但屏幕不反白，肉眼几乎看不到那一下。
+local FULL_REFRESH_PERIOD = 180      -- 清残影周期（分钟）
 local LOW_BATTERY_GUARD = 10         -- 电量低于此值：降频 + 停掉自动拉天气与全刷
 local LOW_BATTERY_TICK_STEP = 30     -- 低电时至少降到这么久一跳
 local FETCH_BACKOFF_MAX = 60 * 60    -- 无数据时重试退避的上限（秒）
 local BATTERY_CACHE_TTL = 600        -- 电量读数缓存（秒），避免每拍都去 lipc 取
 -- v2.67：首绘/唤醒后补刷顶部一条，专治 Kindle 原生状态栏的残留。
--- 高度按物理像素给（120 覆盖竖屏 1072 宽下约 1/9 屏高，横屏同样够）；
--- 延时 0.9 秒是因为 framework 画状态栏落在 KOReader 首绘之后，早了擦不到。
-local TOP_STRIP_HEIGHT = 120
+-- **v2.77：这条补刷已按用户要求取消。** 它本身也是一个完整波形周期（≈450ms，
+-- E Ink 单次提交的固定开销与区域高度无关），一开板就变成「整屏 450ms + 顶部 450ms」，
+-- 耗时翻倍，用户明确不接受。代价：framework 迟到的原生状态栏偶尔在顶部压一行残影，
+-- 下一次整屏刷新（开板/转屏/整点）就会带掉。
+-- TOP_STRIP_DELAY 保留：它还负责「整屏那一刷到底有没有落地」的判定窗口。
 local TOP_STRIP_DELAY = 0.9
+
+-- ---------------------------------------------------------------- 柔化刷新
+-- 「闪」= 波形里的清屏相位：驱动先把整块区域推到黑或白，再画上新内容。
+-- GC16 / GC16_FAST 带这个相位；ui(GC16_FAST+PARTIAL) 只是把清屏做快，闪还在。
+--
+-- 本机（PW3，isREAGL=yes）**不闪**的波形只有一个：waveform_partial = REAGL(8)
+-- （frontend/device/kindle/device.lua:852-854）。KOReader 自己翻页用的就是它，
+-- 用户实测翻页不闪 —— 这是最硬的证据。
+--
+-- 两个曾经踩过的坑，别再踩：
+--  1) GL16(5)。PW3 的 EPDC 波形表里没有 GL16，传进去驱动会退回带清屏的波形，
+--     所以 v2.71 的条带「每一块还是会黑闪」。KOReader 只在**非 REAGL** 机型上
+--     才拿 GL16 当 partial（framebuffer_mxcfb.lua:861），PW3 不走那条分支。
+--  2) UPDATE_MODE_FULL ≠ 闪。mxc_update:417 会把 REAGL 强制成 FULL，那只是
+--     「整块重算」的更新模式，不代表反白；REAGL 波形本身没有清屏相位。
+--     翻页不闪就是 REAGL+FULL 这个组合。
+--
+-- 所以：柔化刷新一律用 Screen.waveform_partial（PW3 上就是 REAGL），绕开
+-- UIManager 直推，波形由机器自己声明，别的机型换上去也自动对。
+local function softWaveform()
+    local wf = Screen and Screen.waveform_partial
+    if type(wf) == "number" and wf > 0 then return wf end
+    return 8                         -- WAVEFORM_MODE_REAGL，兜底
+end
+
+-- ====================================================== E Ink 刷新的硬事实（实测）
+--
+-- v2.75 真机日志（PW3，1072x1448，400 条横带）：
+--     wipe 1072x1448 -> 362 条 x 4 行，用时 164.00s（每条 453.0ms）
+--
+-- 结论一：**一次 SEND_UPDATE 的耗时与区域大小无关，固定约 450ms。**
+--   E Ink 控制器的波形是一整套按帧扫描的动作序列：REAGL 要十几帧，每一帧都要把
+--   整块面板从上到下扫一遍。你只更新 4 行，帧数一帧不少、扫描时间一毫秒不减，
+--   变的只是「有多少像素需要改写」。所以 4 行高的横带和整屏一次推，耗时一样：
+--   竖条 1448 行（v2.74，4 条约 2 秒）、横条 4 行（v2.75，362 条约 164 秒）、
+--   整屏 1072x1448，单次实测都落在 450ms 这个量级上。
+--
+-- 结论二：**「水波扫过去」在这块屏上不可能实现。**
+--   要扫就必须多次提交，N 次提交 = N x 450ms，这是乘法不是加法。
+--   400 条 = 180 秒。任何拆条方案（竖条、横条、斜条、加不加 sleep）都逃不掉。
+--   之前以为「行数少就快」是错的 —— 这才是 v2.70~v2.75 连栽五轮的根因。
+--
+-- 结论三：**能优化的只有次数，不是面积。**
+--   一次开板 = 一次整屏 REAGL = 一个波形周期 ≈ 450ms。这就是物理下限，与
+--   KOReader 翻页同一量级（翻页也就是这个数）。所以策略是：整屏只推一次，
+--   其余来源全部去重（见 softFullRefresh 的返回值与出口层 refreshPartialImp 钩子）。
 
 -- 版本号：显示在菜单「使用说明」那一项上。改动行为后一定同步改这里，
 -- 上机时一眼就能确认「装的到底是不是刚改的这份」（避免文件没覆盖到、
 -- 或者覆盖了但 KOReader 没重启，还在跑内存里的旧模块）。
-local DASHBOARD_VERSION = "2.69"
+local DASHBOARD_VERSION = "3.0"
 
 -- 唤醒宽限期：刚醒来的这几秒里先不拉天气。http.TIMEOUT 是 20 秒，三个接口
 -- 外加 LuaSec/socket.http 双通道，最坏能同步卡住一两分钟；而休眠之后天气必然过期，
@@ -435,7 +530,7 @@ end
 function Meter:paintTo(bb, x, y)
     local w, h = self.dimen.w, self.dimen.h
     if w < 2 or h < 1 then return end
-    bb:paintRect(x, y, w, h, self.track or RULE_SOFT)
+    bb:paintRect(x, y, w, h, self.track or TRACK)
     local r = math.max(0, math.min(1, self.ratio or 0))
     local filled = math.floor(w * r + 0.5)
     if filled > 0 then
@@ -906,6 +1001,16 @@ end
 
 -- ------------------------------------------------------------------ 生命周期
 function Dashboard:init()
+    -- 配色先定型：下面装钩子、读缓存的过程中可能就有绘制
+    do
+        local saved
+        pcall(function()
+            saved = G_reader_settings and G_reader_settings:readSetting("dashboard_ui_style")
+        end)
+        applyUiStyle(saved)
+    end
+    self:installSoftRefreshHook()
+    self:installSoftImpHook()
     self.cache = LuaSettings:open(DataStorage:getSettingsDir() .. "/dashboard_cache.lua")
     local cached = self.cache:readSetting("weather")
     -- source 标记用于识别旧版 Open-Meteo 缓存（WMO 代码），避免用错代码表；
@@ -1069,7 +1174,9 @@ function Dashboard:genMenuItemTable()
                         .. "右上角显示电量百分比与电量图标（充电时图标反白）。\n"
                         .. "天气优先用和风天气，不可用时自动降级到 Open-Meteo，页脚会标注来源。\n"
                         .. "空闲超时或按电源键休眠时，屏幕会停留在看板上（相当于屏保）。\n"
-                        .. "长时间显示建议接通电源；全刷周期默认 60 分钟，可在「显示与省电 → 省电设置」里调。\n\n"
+                        .. "长时间显示建议接通电源；清残影默认 180 分钟一次，且默认不再整屏反白，\n"
+                        .. "可在「显示与省电 → 省电设置」里调。\n"
+                        .. "想再减轻刷新时的黑闪感，可在「外观 → 界面配色」换成「报纸黑白风」。\n\n"
                         .. "看板版本 v" .. DASHBOARD_VERSION,
                         "Gestures: tap to refresh · swipe up to exit\n"
                         .. "Swipe down from the top edge: dashboard menu (appearance / location & weather /\n"
@@ -1091,7 +1198,8 @@ function Dashboard:genMenuItemTable()
                         .. "and the footer shows the current source.\n"
                         .. "On idle or power-button sleep the screen keeps the dashboard (acts as a\n"
                         .. "screensaver). For long display, keep it plugged in; full refresh\n"
-                        .. "defaults to every 60 minutes (Display & power → Power saving).\n\n"
+                        .. "defaults to every 180 minutes (Display & power → Power saving).\n"
+                        .. "For the calmest refresh, set Appearance → UI theme to Newsprint.\n\n"
                         .. "Dashboard version v" .. DASHBOARD_VERSION),
                 })
             end,
@@ -1133,6 +1241,31 @@ function Dashboard:genAppearanceMenu()
     -- 分隔线画在「版式三项」之后（TouchMenu 的 separator 是画在**本项下面**的，
     -- 所以要挂在第三项上，挂到第四项就会落到「竖屏布局」和「横屏布局」中间）。
     sub[#sub].separator = true
+    -- v2.78：界面配色。两套墨阶，切换后立刻整屏重绘一次。
+    -- 放在版式三项之后、布局之前 ——「这块板子长什么样」先于「每块放什么」。
+    sub[#sub + 1] = {
+        text = T("界面配色"),
+        help_text = TL(
+            "「浅灰卡片风」是 0xEE 灰纸底 + 白卡，层次靠白卡与灰底的差别，画面柔和。\n"
+            .. "「报纸黑白风」整屏只有纯白与纯黑两阶：刷新时大面积白底几乎不动，\n"
+            .. "只剩黑字黑线在变，黑闪感最轻；代价是画面更硬朗、少一层柔和。",
+            "Card grey: 0xEE paper with white cards; depth comes from card-vs-paper.\n"
+            .. "Newsprint: pure white and pure black only. Large white areas barely move\n"
+            .. "during a refresh, so only black ink changes — the calmest option."),
+        sub_item_table = {
+            {
+                text = T("浅灰卡片风"),
+                checked_func = function() return ui_style ~= STYLE_PAPER end,
+                callback = function(menu) self:setUiStyle(STYLE_CARD, menu) end,
+            },
+            {
+                text = T("报纸黑白风"),
+                checked_func = function() return ui_style == STYLE_PAPER end,
+                callback = function(menu) self:setUiStyle(STYLE_PAPER, menu) end,
+            },
+        },
+        separator = true,
+    }
     -- 下面四条就是原来的「布局组件」那一层，只是换了个挂点：
     -- 层级深度不变（外观 → 竖屏布局 → 区 → 组件），省掉的只是顶层的一条。
     for _, it in ipairs(self:genLayoutMenu()) do sub[#sub + 1] = it end
@@ -1354,7 +1487,7 @@ function Dashboard:genLangMenu()
 end
 
 -- ------------------------------------------------------------------ 省电菜单
---- 「省电设置」：时钟刷新粒度 / 天气更新间隔 / 全刷周期 / 低电保护。
+--- 「省电设置」：时钟刷新粒度 / 天气更新间隔 / 清残影周期 / 低电保护。
 --- 四项都写进 G_reader_settings，tick 每拍现读，改完立即生效。
 --- 为什么把「时钟刷新」放第一位：常开时它是最大的单项支出——
 --- 原来每分钟整屏刷新，一天 1440 次；提到 5 分钟后只剩 288 次。
@@ -1404,12 +1537,15 @@ function Dashboard:genPowerMenu()
                 .. "Longer is cheaper. Nothing is fetched in the first 25 s after wake."),
             POWER_KEYS.weather, UPDATE_INTERVAL, { 15 * 60, 30 * 60, 60 * 60, 120 * 60 },
             function(v) return minutes(math.floor(v / 60)) end),
-        pick(T("全刷周期"), TL(
-                "每隔多久整屏闪一次，用来清电泳残影。关掉以后画面更安静，\n"
+        pick(T("清残影周期"), TL(
+                "每隔多久清一次电泳残影。v2.70 起这一步默认不再整屏反白，\n"
+                .. "而是整屏推一遍「轻度」波形，屏幕上几乎看不到闪；\n"
+                .. "攒够 8 次才补一次真正的整屏全刷。关掉以后画面更安静，\n"
                 .. "但长时间显示同一版式会留下淡淡的影子。",
-                "How often the whole screen flashes to clear e-ink ghosting.\n"
-                .. "Turning it off keeps the screen calm but may leave faint ghosts."),
-            POWER_KEYS.full_refresh, FULL_REFRESH_PERIOD, { 30, 60, 120, 240, 0 },
+                "How often e-ink ghosting is cleared. Since v2.70 this no longer\n"
+                .. "flashes the screen: it pushes a mild full-screen waveform instead,\n"
+                .. "and only every 8th time performs a real full refresh."),
+            POWER_KEYS.full_refresh, FULL_REFRESH_PERIOD, { 60, 120, 180, 240, 0 },
             function(v)
                 if v == 0 then return T("关闭") end
                 return minutes(v)
@@ -1741,22 +1877,19 @@ end
 
 -- ------------------------------------------------------------------ 打开 / 关闭
 
---- 首绘之后补一刀「只刷顶部一条」，专门擦 Kindle 原生状态栏的残留。
+--- 首绘之后的「整屏落地检查」。
 ---
---- 为什么需要：那个状态栏（时间 / 电量 / WiFi）是 Kindle framework 直接往 fb0 上画的，
---- 不归 KOReader 管。实测它经常落在看板首绘**之后**——首绘那次整屏 full 刷得再干净，
---- 它后脚又写上来，屏幕上就压着一条「上午 12:53 82%」，盖掉 A 区最上面一行。
+--- **v2.77：原来这里会补刷顶部一条，现已按用户要求取消。**
+--- 那条补刷是为了擦掉 Kindle framework 迟到的原生状态栏（时间 / 电量 / WiFi 直接
+--- 画在 fb0 上，常落在看板首绘之后）。但它本身也是一个完整波形周期 ≈450ms
+--- （E Ink 单次提交的固定开销，与区域高度无关），一开板就变成
+--- 「整屏 450ms + 顶部 450ms」，总时长翻倍。现在接受「偶尔顶部压一行残影」，
+--- 下一次整屏刷新（开板 / 转屏 / 整点）就会带掉。
 ---
---- 为什么只刷一条而不是整屏：`setDirty(nil, "full", region)` 会按全刷波形把指定区域
---- 推一遍，内容取自 bb（此刻已经是看板自己画的），所以能擦掉屏幕上的旧像素；
---- 而整屏补刷等于让整个画面再闪一下——为了擦一条 120px 的状态栏付这个代价没必要。
---- 传 region 还有个附带好处：v2.65 的转屏静音只吞「覆盖整屏」的刷新，这条不会被吞。
----
---- v2.69：这个补刷有两个「必须整屏」的例外，靠 opts.full 或自动判定触发——
---- 只补顶部一条的前提是「整屏已经刷过一次」，一旦那一刷没落到屏幕上，
---- 补一条就只剩下「上面是看板、下面还是阅读页」的半新半旧，而且会一直停在那儿。
+--- 只保留两个「必须整屏」的兜底 —— 前提是「整屏已经刷过一次」，一旦那一刷没落到
+--- 屏幕上，画面就会停在「上面看板、下面还是阅读页」的半新半旧，而且不会自愈：
 ---   · 本次会话的第一次开板（opts.full）—— 首绘那一刷在冷启动路径上不可靠；
----   · 转屏静音窗口里发现整屏一次都没刷出去（_mute_full 且 _own_painted 为假）。
+---   · 转屏静音窗口里发现整屏一次都没刷出去（_mute_full 且 _open_painted 为假）。
 function Dashboard:brushTopStrip(delay, opts)
     if not UIManager or not Screen then return end
     local full = opts and opts.full
@@ -1768,27 +1901,19 @@ function Dashboard:brushTopStrip(delay, opts)
         local stack = UIManager._window_stack
         local top = stack and stack[#stack] and stack[#stack].widget
         if top and top ~= self.root and top.text then return end
-        -- 静音窗口还开着、而整屏那一刷并没有真的发出去：这次补刷必须整屏，
-        -- 否则屏幕会停在半新半旧上（转屏后再也不会自己好）。
-        if not full and self._mute_full and not self._own_painted then
-            full = true
+        -- v2.77：顶部标题栏那条补刷已取消（用户要求，省掉一整个 450ms 周期）。
+        -- 这里只剩一种情况必须动手：「整屏那一刷根本没落到屏幕上」——
+        --    · 本次会话首次开板（opts.full，冷启动首绘不可靠）；
+        --    · 转屏静音窗口里发现整屏一次都没刷出去（_mute_full 且 _open_painted 为假）。
+        -- 其余情况一律什么都不刷：像素已经在屏上了，再推就是白等 450ms。
+        local need_full = full or (self._mute_full and not self._open_painted)
+        if not need_full or self._open_painted then
+            return
         end
-        local w, h = Screen:getWidth(), Screen:getHeight()
-        -- 关键：只「刷新」不「重绘」擦不掉。Kindle 的 bb 与 fb0 共用同一块内存，
-        -- framework 的状态栏是直接写进 bb 的——那条区域此刻已经脏了，再拿它刷只是
-        -- 把脏内容重新推一遍（实测连刷三次，「上午 1:07」纹丝不动）。
-        -- 所以先重绘 root（纯内存 blit，几十毫秒），让 bb 顶部恢复成看板自己的内容，
-        -- 再只刷这一条：屏幕只闪这一条，其余区域一动不动。
+        -- 整屏兜底：先让 bb 回到看板自己的内容（纯内存 blit），再整屏推一次。
         pcall(function() self.root:paintTo(Screen.bb, 0, 0) end)
-        -- _own_full：整屏那一刷要能穿过转屏静音窗口，那是看板唯一该刷的一刷。
-        self._own_full = full or nil
-        if full then
-            UIManager:setDirty(nil, "full")
-        else
-            UIManager:setDirty(nil, "full", Geom:new{
-                x = 0, y = 0, w = w, h = math.min(TOP_STRIP_HEIGHT, h),
-            })
-        end
+        self._own_full = true
+        self:softFullRefresh("wipe")
         self._own_full = nil
     end)
 end
@@ -1799,6 +1924,8 @@ function Dashboard:open()
     -- 用户从菜单里直接打开看板）。先撤掉，否则同一块屏幕上会叠两棵看板树。
     self:dismissSaverFrame()
     self.shown = true
+    -- 开板时刻：天气回调要用它判断「这只是一次开板内的首次拉取」，别为它再整屏重排一次
+    self._open_ts = os.time()
     -- 记下打开前的屏幕方向，关闭时原样恢复，别把整个 KOReader 留在横屏
     self.base_rotation = screen_rotation()
     -- 恢复电源键 + 允许休眠：老版本这里设 preventScreenSaver=1 并 preventStandby，
@@ -1811,6 +1938,10 @@ function Dashboard:open()
     self.relayout_pending = false
     self.pending_orientation = nil
     self._last_tick_ts = os.time()
+    -- v2.70：清残影改成「距上次够久就做一次」，开板这一刻重置基准，
+    -- 免得刚打开就因为上次会话留下的旧时间戳立刻清一次。
+    -- 轻度计数不清零：那是个长周期的残影保险，跨会话累计才有意义。
+    self._last_clear_ts = os.time()
     self._resume_ts = nil
     -- 沿用上次选定的方向：选了横屏，重启 KOReader 打开看板时仍然是横屏；
     -- 选的是竖屏而设备当前是横的（上次没还原干净），这里也一并转回去
@@ -1844,17 +1975,17 @@ function Dashboard:open()
         self:relayoutAfterRotate(rotated)
     else
         self.force_landscape = nil
-        self:refreshLayout()
+        -- v2.72：开板这一刷走整屏柔化推（不反白）。原来是无参 refreshLayout()
+        -- → 整屏 full → GC16+FULL 整屏反白，这就是「点开看板时黑闪一下」。
+        self:refreshLayout("wipe")
     end
     self:fetchWeather()
     self:scheduleTick()
-    -- 首绘完成后补擦顶部一条（Kindle 原生状态栏常在这一刻之后才写上来）
+    -- 首绘之后的落地检查（v2.77 起不再补擦顶部一条，理由见 brushTopStrip 的说明）
     --
-    -- v2.69：**本次会话的第一次开板**改成整屏确认一次。冷启动路径上首绘那一刷
-    -- 不一定落到屏幕上（转屏静音吞掉 / 底层界面迟到的一刷盖回来），而这时只补
-    -- 顶部一条，屏幕上就只剩「上面看板、下面阅读页」——而且会一直停在那儿，
-    -- 得手动全刷一次才恢复。整屏那一刷只在会话首次付出（多闪一下），
-    -- 之后各次开板、唤醒仍是只擦顶部。
+    -- v2.69：**本次会话的第一次开板**曾经无条件再整屏确认一次。现在判据是
+    -- _open_painted —— 开板那一次 softFullRefresh 真的推成功了就不再补，
+    -- 所以正常路径下开板只有一次 450ms 的整屏刷新，冷启动首绘没落地时才补。
     local first_paint = not self._painted_once
     self._painted_once = true
     self:brushTopStrip(nil, { full = first_paint })
@@ -2049,7 +2180,19 @@ function Dashboard:renderSaverFrame()
     -- （用户刚开完板就按电源键）绝不能把它吞掉——休眠期间主循环不跑，
     -- 吞掉了就没有第二次机会，屏幕上会停在「上面看板、下面阅读页」。
     self._own_full = true
-    UIManager:setDirty(root, "full")
+    -- v2.72：休眠这一帧走本机 partial 波形（PW3=REAGL，不反白）。
+    -- 从阅读页整体换到看板，内容差异大，只写不清会留一点上一层字的淡影；
+    -- 嫌脏就把 dashboard_saver_full_flash 设成 true，退回一次干净的 GC16 全刷（会闪）。
+    local soft = self:softRepaintEnabled()
+        and not G_reader_settings:isTrue("dashboard_saver_full_flash")
+    if soft and Screen and Screen.bb then
+        local w, h = Screen:getWidth(), Screen:getHeight()
+        if not (self:_paintToBB(root) and self:_flushRegion(0, 0, w, h, true)) then
+            UIManager:setDirty(root, "full")
+        end
+    else
+        UIManager:setDirty(root, "full")
+    end
     self._own_full = nil
     -- 挂起紧跟着就发生，必须在这里同步刷完，否则屏幕还停在旧画面上
     pcall(function() UIManager:forceRePaint() end)
@@ -2064,22 +2207,32 @@ function Dashboard:dismissSaverFrame()
     end
 end
 
---- 唤醒：撤掉屏保树，并把看板校正到「现在」
+--- 唤醒：撤掉屏保树，并把看板校正到「现在」。
+--- 返回值：本函数是否已经把整屏刷过了。外面拿它决定要不要再让 framework
+--- 补一次 setDirty("all","full")——见 installScreenSaverHook 里的说明。
 function Dashboard:onLeaveScreenSaver()
+    -- 唤醒后 4 秒内，把 framework 那记整屏 full 也换成本机的不闪波形。
+    -- 只在这一小段里生效：之后用户翻页、开菜单都该走 KOReader 自己的选择。
+    self._soften_until = os.time() + 4
     self:dismissSaverFrame()
     self.screensaver_owned = false
-    if not self.shown then return end
+    if not self.shown then return false end
     -- 两个问题一起解决：
     --  · 定时器基于 CLOCK_MONOTONIC，休眠期间不走，唤醒后最多还要再等一整分钟
     --    才到点，这一分钟里屏幕上还是睡前的时钟；
     --  · 电量、日期、农历、跨日（睡过去一整晚）也都是旧的。
     -- 直接重建一次版面最省事，也把电池/日期一次校正。
     self._resume_ts = os.time()
-    self:refreshLayout()
+    -- v2.72：唤醒这一刷是一次整屏柔化推（本机 partial 波形，不反白）。
+    -- 按电源键之后是全屏内容整体换一遍，原来整屏 full 就是那一下最明显的黑闪；
+    -- 现在只把像素写上去、不做清屏相位，屏幕不会先反白。
+    self:refreshLayout("wipe")
     -- 唤醒是状态栏残留最常见的时机：framework 醒来第一件事就是重画时间与电量，
     -- 那时看板还没重排，重排完那条就压在顶上了——补一刀只擦顶部。
     self:brushTopStrip()
     self:scheduleTick()
+    -- 菜单占着屏时 refreshLayout 只会挂个待办、并不会画，这种情形不能替 framework 兜底
+    return not self.menu_open
 end
 
 --- 把我们的逻辑挂到 Screensaver 的 show/close 上（只装一次，只在 Kindle 上装）
@@ -2117,14 +2270,21 @@ function Dashboard:installScreenSaverHook()
         --  · 休眠时现建的看板树 → 由 onLeaveScreenSaver 撤掉
         -- orig_close 必须在撤树之前跑：它内部的 cleanup() 是唯一会把
         -- Device.screen_saver_mode 复位的地方，跳过它下次休眠就进不了 show 分支了。
-        -- 它的返回值（「没有 widget」时是 nil）不能用，我们在下面自己返回 true。
+        -- 它的返回值（「没有 widget」时是 nil）不能用，返回值由下面自己给。
         orig_close(ss, ...)
-        local ok2, err = pcall(function() this:onLeaveScreenSaver() end)
+        local ok2, repainted = pcall(function() return this:onLeaveScreenSaver() end)
         if not ok2 then
-            logger.warn("dashboard: 唤醒处理失败", tostring(err))
+            logger.warn("dashboard: 唤醒处理失败", tostring(repainted))
+            -- 唤醒处理挂了：老实退回老做法，让 framework 补一次整屏 full
+            return true
         end
-        -- 一律返回 true 让 outofScreenSaver 做一次全屏重绘，把休眠前的界面刷回来。
-        return true
+        -- v2.70：这里原来无条件 return true，等于唤醒必有一记整屏 full ——
+        -- 而 onLeaveScreenSaver 自己刚用柔化整屏刷过一遍，紧接着 framework 又整屏反白，
+        -- 那一刷白做。现在只有「我们自己没刷」时才让它补：
+        --   · 看板没打开（用户在看书/书架）→ 屏幕还停在屏保帧，必须让 framework 刷回来
+        --   · 菜单占着屏导致重排被挂起 → 同上
+        -- 其余情形我们已经把整屏刷完了，返回 false 免得再闪一下。
+        return not repainted
     end
 
     logger.dbg("dashboard: 已接管休眠屏保")
@@ -2218,7 +2378,8 @@ function Dashboard:tick()
     if last_ts and wall - last_ts > TICK_GAP_REBUILD then
         logger.dbg("dashboard: 距上次 tick", wall - last_ts, "秒，按唤醒处理，重建版面")
         self._resume_ts = self._resume_ts or wall
-        self:refreshLayout()
+        -- 长间隔自愈 = 设备刚从挂起里出来，和真唤醒一样，走擦除渐显不闪
+        self:refreshLayout("wipe")
         self:scheduleTick()
         return
     end
@@ -2237,16 +2398,32 @@ function Dashboard:tick()
     if self.clock_widget and clock ~= self.clock_text then
         self.clock_text = clock
         self.clock_widget:setText(clock)
-        UIManager:setDirty(self.clock_widget, "ui")
+        -- v2.72：时钟这块用本机 partial 波形直推，不再走 setDirty(...,"ui")（GC16_FAST 会闪）
+        if not self:softRefreshRegion(self.clock_widget) then
+            UIManager:setDirty(self.clock_widget, "ui")
+        end
     end
 
     -- 跨日：日期/农历/节气/月历全部要重算
     local day_key = string.format("%04d%02d%02d", now.year, now.month, now.day)
     if day_key ~= self.day_key then
-        self:refreshLayout()
-    elseif not low and pc.full_refresh > 0 and now.min % pc.full_refresh == 0 then
-        -- 全刷是为了清电泳残影，纯消耗：低电时先让位，接上电就恢复
-        UIManager:setDirty(self.root, "full")
+        -- v2.72：跨日整版换（日期/农历/节气/月历全变），走整屏柔化刷而不是整屏反白
+        self:refreshLayout("wipe")
+    elseif not low and pc.full_refresh > 0 then
+        -- 清电泳残影，纯消耗：低电时先让位，接上电就恢复。
+        --
+        -- v2.70 修两个毛病：
+        --  · 原来判的是 `now.min % pc.full_refresh == 0`，而 now.min 只有 0~59。
+        --    周期设成 60 分钟以上时，这个条件一小时里只有「那一分钟」成立，
+        --    时钟粒度 5 分钟还可能整整跳过它 —— 表现就是「明明设了周期却从不全刷」。
+        --    改成「距上次清残影够久就做一次」，与 tick 粒度彻底解耦。
+        --  · 说明：这一刷本来就是「整屏反白清残影」，闪是它的工作，不是 bug。
+        --    周期默认 3 小时，一天顶多五次；其余所有刷新都不闪。
+        local last_clear = self._last_clear_ts
+        if not last_clear or wall - last_clear >= pc.full_refresh * 60 then
+            self._last_clear_ts = wall
+            self:clearGhosting()
+        end
     end
 
     -- 定时拉取天气：有数据时按设置间隔，还没有数据时 5 分钟重试。
@@ -2794,13 +2971,314 @@ function Dashboard:updateLabel(ctx)
 end
 
 -- ------------------------------------------------------------------ 界面构建
+-- ---------------------------------------------------------------- 柔化刷新实现
+-- 波形用「本机自己声明的 partial 波形」（softWaveform()，PW3 上是 REAGL），
+-- 和 KOReader 翻页完全同一条路径 —— 用户实测翻页不闪，这是唯一可信的参照。
+-- 不用 GL16：PW3 的 EPDC 波形表里没有它，传进去会退回带清屏的波形，照样黑闪。
+-- 也不走 UIManager 的模式表：那里能选的全是 GC16 一族（带清屏相位）。
+-- 代价是残影：REAGL 只写不清，攒久了发灰，靠定时的整屏全刷（clearGhosting）收掉。
+
+--- 本机是否具备「不反白的整屏刷新」能力。
+---
+--- v3.0 起恒为 true：这块屏上不反白的波形只有 REAGL，而 REAGL 正是 KOReader
+--- 翻页在用的那条路，没有理由退回「每次整屏先反白」。函数保留是为了让调用点
+--- 维持能力分支的写法（`if not softRepaintEnabled() then 退回整屏 full`），
+--- 真换到不支持的机型时只改这一处即可。
+function Dashboard:softRepaintEnabled()
+    -- v2.78 取消了开关，v3.0 定稿保留能力探测的形态。
+    -- 实测这块屏上不反白的波形只有 REAGL，而 REAGL 正是 KOReader 翻页在用的那条路，
+    -- 没有任何理由退回「每次整屏先反白」。函数保留是因为调用点都写成能力分支
+    -- （`if not softRepaintEnabled() then 退回整屏 full`），逐个删容易漏掉降级路径。
+    return true
+end
+
+--- 把某一层控件画进 framebuffer，并把 UIManager 排着的那批刷新作废。
+---
+--- 两件事必须一起做，少一件就白改：
+---  · 只刷不画：bb 里还是旧内容（framework 的状态栏也是直接写进 bb 的），
+---    推上去等于把旧像素重推一遍，屏幕上纹丝不动；
+---  · 不作废队列：`UIManager:show()` / `close()` 会往 _refresh_stack 里排刷新，
+---    _repaint 是下一轮主循环才跑的 —— 自己刚推完一整屏，它紧接着又整屏推一次。
+---    真机观感就是「换过去之后又闪了一下」，v2.70.3 正是栽在这里。
+function Dashboard:_paintToBB(widget)
+    local wgt = widget or self.root
+    if not (Screen and Screen.bb and wgt and wgt.paintTo) then return false end
+    local ok = pcall(function()
+        if Screen.beforePaint then Screen:beforePaint() end
+        wgt:paintTo(Screen.bb, 0, 0)
+        if Screen.afterPaint then Screen:afterPaint() end
+    end)
+    if UIManager then
+        UIManager._dirty = {}
+        local stack = UIManager._refresh_stack
+        if type(stack) == "table" then
+            for i = #stack, 1, -1 do table.remove(stack, i) end
+        end
+    end
+    return ok
+end
+
+--- 记一下「我刚把整屏推到屏上」的时刻。
+---
+--- 两条链路要用它：
+---  · 出口钩子在 2 秒内吞掉重复的整屏 refreshPartialImp —— `_repaint` 队列空时
+---    会自己补一条裸 "partial"（uimanager.lua:1291），而那一段是
+---    `refresh_methods[refresh.mode](Screen, ...)` 直接查表调用（:1300-1312），
+---    根本不经过 `_refresh`，入口钩子看不见它。真机证据就是 v2.73 日志里
+---    15:42:57 那条孤零零的 `IOCTL refreshPartialImp 1072x1448` ——
+---    「条带扫完之后屏幕整体又黑闪一次」正是它。
+---  · 同一时刻 bb 与屏幕内容一致，再推一遍只会多闪一次，没有任何收益。
+function Dashboard:markSelfFlush()
+    self._self_flush_ts = os.time()
+end
+
+--- 用「这台机器自己的不闪波形」（PW3 = REAGL）推一块区域。
+---
+--- wait=true 时等它真正显示完再返回。REAGL 其实已经由驱动自动串行
+--- （mxc_update:341 会对 REAGL 等上一个 marker），这里留着是给退化成
+--- 其它波形时兜底。
+function Dashboard:_flushRegion(x, y, w, h, wait)
+    if not (Screen and type(Screen.mech_refresh) == "function") then return false end
+    local ok = pcall(function() Screen:mech_refresh(false, softWaveform(), x, y, w, h) end)
+    if not ok then return false end
+    if wait and type(Screen.refreshWaitForLast) == "function" then
+        pcall(function() Screen:refreshWaitForLast() end)
+    end
+    return true
+end
+
+--- 只把某一小块（时钟）用本机 partial 波形推上去，其余像素一动不动。
+---
+--- setDirty(widget, "ui") 走的是 GC16_FAST：虽然只闪那一小块，但每 5 分钟闪一下
+--- 一样碍眼。柔化波形只写不清，代价是那块会攒一点残影 —— 交给定时的整屏全刷收掉。
+--- 菜单开着时一律不接管：paintTo 会把菜单从 bb 上抹掉，而屏幕上只推了时钟那块。
+function Dashboard:softRefreshRegion(widget)
+    if not (widget and widget.dimen) then return false end
+    if self.menu_open or not self.root then return false end
+    if not self:softRepaintEnabled() then return false end
+    if not self:_paintToBB(self.root) then return false end
+    local d = widget.dimen
+    return self:_flushRegion(d.x, d.y, d.w, d.h, true)
+end
+
+-- v2.76：条带（pushWipe）已彻底删除。
+-- 实测 362 条 x 453ms = 164 秒，证明「拆条 = N x 一次整屏」，拆得越细越慢。
+-- 若真要「扫过去」，唯一的办法是让驱动支持局部窗口化的波形序列，PW3 的 EPDC 不支持。
+
+--- 整屏重绘：一次 REAGL 推完，不反白，耗时约一个波形周期（450ms）。
+---
+--- mode 只为兼容调用方的语义（"wipe"=整屏换内容 / "soft"=数值刷新）而保留，
+--- 两者现在完全一样 —— 拆条已实测证伪，见文件头「E Ink 刷新的硬事实」。
+--- 450ms 是这块屏的物理下限（不开清屏相位、只推一次），与翻页同一量级。
+---
+--- 返回 true 表示「像素已由我自己推到屏上」，调用方据此判断还要不要补一记整屏。
+function Dashboard:softFullRefresh(mode)
+    if not (Screen and UIManager) then return false end
+    if not self:softRepaintEnabled() then
+        UIManager:setDirty(nil, "full")
+        return false
+    end
+    local w, h = Screen:getWidth(), Screen:getHeight()
+    if self:_paintToBB(self.root) and self:_flushRegion(0, 0, w, h) then
+        self._own_painted = true
+        self:markSelfFlush()
+        return true
+    end
+    -- 底层接口不对（非 mxcfb、没有 bb、驱动不认这个波形）：退回整屏 ui，
+    -- 虽然还会闪一下，但至少画面是对的。
+    UIManager:setDirty(nil, "ui")
+    return false
+end
+
+--- 诊断：包装底层刷新实现，记录每一次真实 ioctl 的区域。--- 诊断：包装底层刷新实现，记录每一次真实 ioctl 的区域。
+---
+--- 为什么包装 *Imp 而不是 refreshFull / refreshPartial：uimanager 里的
+--- refresh_methods 表在模块加载时就把 Screen.refreshFull 这些**函数引用抓走了**，
+--- 之后再替换 Screen 上的同名方法对 UIManager 完全没有影响；而 fb:refreshFull 内部
+--- 是 `self:refreshFullImp(...)` 动态查表，换 *Imp 才拦得住真正的 ioctl。
+--- 常驻柔化钩子：看板显示期间，把所有「整屏反白」类刷新改写成 REAGL 整屏。
+---
+--- 为什么要在 _refresh 这一层拦，而不是逐个改调用方：
+--- 整屏 full 的来源太多 —— 天气回调重排、KOReader 自己的 promotion
+--- （partial 攒够 6 次升 flashui）、底层界面重排、framework 状态栏刷新……
+--- v2.71 在调用方逐个改，日志里仍然看到 `hook PASS mode=flashui` 跟一条
+--- 整屏 `refreshFullImp`，就是漏网的那条。这里改成入口统一改写，一次拦干净。
+---
+--- 改写成 "[partial]"（不是 "partial"）：
+---  · "partial" 会被 _refresh:1163 的「6 次升一次 full」计数命中，每 6 次自己闪一下；
+---  · 也会被 avoid_flashing_ui 降级成 ui（GC16_FAST，照样闪）。
+---  方括号模式绕开这两条，落到 refreshNoMergePartial → refreshPartialImp，
+---  在 PW3 上就是 REAGL + FULL，和 KOReader 翻页完全同一条路径。
+function Dashboard:installSoftRefreshHook()
+    if self._soft_hooked then return end
+    local orig = UIManager and UIManager._refresh
+    if type(orig) ~= "function" then return end
+    self._soft_hooked = true
+    self._orig_soft_refresh = orig
+    local this = self
+    UIManager._refresh = function(mgr, mode, region, dither)
+        if this._real_full_pending then
+            -- clearGhosting 要的那一记真全刷：这里只放行、**不清标记**。
+            -- 标记留给底层出口那一层去清（installSoftImpHook），因为入队到出队之间
+            -- 还可能被合并/丢弃，谁真正发了 ioctl 才算数。
+            return orig(mgr, mode, region, dither)
+        end
+        local softening = this.shown or this.saver_root
+        -- 唤醒后头几秒也算：那时看板已被撤掉（看书时按电源键），屏幕要从屏保帧
+        -- 换回阅读页，framework 会发一记整屏 full —— 那正是「关屏保还是黑闪」的来源。
+        if not softening and this._soften_until and os.time() <= this._soften_until then
+            softening = true
+        end
+        if this:softRepaintEnabled() and softening then
+            local covers = (region == nil)
+            if region then
+                covers = region.w >= Screen:getWidth() and region.h >= Screen:getHeight()
+            end
+            -- 为什么 "partial" / "ui" 也要拦：
+            --   · _repaint 在「有脏区但队列空」时会自己补一条裸 "partial"
+            --     （uimanager.lua:1291），而 "partial" 在 **orig 内部** 每满 6 次
+            --     会被提升成 "full"（:1163）—— 那一下是整屏 GC16 反白。
+            --     只在门口判一次是拦不到它的，必须提前改成 "[partial]" 才不会被提升。
+            --   · "ui" = GC16_FAST，清屏相位还在，整屏 ui 就是一整屏黑闪
+            --     （打开看板后「整体变完又闪几下」多半是这条）。
+            -- 两条都只拦整屏：局部区域（状态栏、菜单、进度条）保持原样，
+            -- 那些地方闪一下也只是一小块，改了对残影反而不好。
+            if covers and (mode == "full" or mode == "flashui" or mode == "flashpartial"
+                or mode == "partial" or mode == "ui") then
+                return orig(mgr, "[partial]", region, dither)
+            end
+        end
+        return orig(mgr, mode, region, dither)
+    end
+end
+
+--- 唤醒后头几秒要不要压黑闪 —— _refresh 层和出口层共用这一个判断。
+function Dashboard:softenNow()
+    if self.shown or self.saver_root then return true end
+    local until_ts = self._soften_until
+    if until_ts and os.time() <= until_ts then return true end
+    return false
+end
+
+--- clearGhosting 要的真·全刷：3 秒内有效，过期自动作废。
+--- 用时间戳而不是布尔：万一那一记 full 被合并/丢弃，标记不会一直挂着，
+--- 否则下一次本该柔化的整屏刷新会被它放行成整屏反白。
+function Dashboard:realFullDue()
+    local t = self._real_full_pending
+    if not t then return false end
+    if os.time() - t > 3 then
+        self._real_full_pending = nil
+        return false
+    end
+    return true
+end
+
+--- 柔化刷新的**出口兜底**：装在底层刷新实现上，执行时再判一次。
+---
+--- 为什么光有 _refresh 层的钩子不够（v2.72 首版真机日志）：
+---   [15:31:35] onLeaveScreenSaver shown=nil saver_mode=false
+---   [15:31:36] IOCTL refreshFullImp 1072x1448+0+0 | ... uimanager.lua:1310 '_repaint'
+--- 唤醒那一路的顺序是「framework 先把 setDirty(nil,"full") 入队 → 我们的
+--- onLeaveScreenSaver 才跑、才打开柔化窗口 → 主循环 _repaint 才出队执行」。
+--- 入队那一刻窗口还没开，_refresh 层的钩子放行了，两条整屏反白照样落到屏上。
+---
+--- 出口这一层是**执行时**判断，不管当初谁入的队、入的什么模式。而且
+--- refreshFull / refreshFlashUI / refreshFlashPartial 最后都是
+--- `self:refreshFullImp(...)` 或同名兄弟（ffi/framebuffer_mxcfb.lua:779-801，
+--- 三个 Imp 里 is_flashing 都是 true）。把它们改成走 refreshPartialImp，
+--- 就等于 mech_refresh(false, waveform_partial) —— PW3 上就是 KOReader 翻页那一刷。
+function Dashboard:installSoftImpHook()
+    if self._soft_imp_hooked then return end
+    if not (Screen and type(Screen.refreshPartialImp) == "function") then return end
+    self._soft_imp_hooked = true
+    local this = self
+    -- refreshUIImp 也列进来：它走 GC16_FAST，清屏相位还在，整屏 ui 就是一整屏闪。
+    -- 但小区域的 ui 刷新（菜单、高亮、状态栏那条）必须保持原样 —— 那是 KOReader
+    -- 交互里该有的即时反馈，换成 REAGL 会让小字发虚、残影叠得快。所以只拦大块。
+    local names = { "refreshFullImp", "refreshFlashUIImp", "refreshFlashPartialImp",
+        "refreshUIImp" }
+    local function bigEnough(x, y, w, h)
+        local sw, sh = Screen:getWidth(), Screen:getHeight()
+        return (w * h) >= (sw * sh * 0.5)
+    end
+    for k = 1, #names do
+        local n = names[k]
+        local orig = Screen[n]
+        if type(orig) == "function" then
+            pcall(function()
+                Screen[n] = function(s, x, y, w, h, d)
+                    if this:realFullDue() then
+                        this._real_full_pending = nil
+                        return orig(s, x, y, w, h, d)
+                    end
+                    if this:softenNow() and this:softRepaintEnabled()
+                        and (n ~= "refreshUIImp" or bigEnough(x, y, w, h)) then
+                        return s:refreshPartialImp(x, y, w, h, d)
+                    end
+                    return orig(s, x, y, w, h, d)
+                end
+            end)
+        end
+    end
+
+    -- v2.74：重复的整屏 partial 直接吞掉。
+    --
+    -- `_repaint` 的收尾是 `refresh_methods[refresh.mode](Screen, ...)`
+    -- （uimanager.lua:1300-1312）—— 直接从 _refresh_stack 里取 mode、查模块加载时
+    -- 抓好的函数引用，**不经过 _refresh**。所以：
+    --   · 入口钩子（installSoftRefreshHook）看不到它，日志里连一行 soft-hook 都没有；
+    --   · 上面那几个 Imp 钩子只包了 Full/FlashUI/FlashPartial/UI，也拦不到。
+    -- 真机就是 v2.73 那段：
+    --   [15:42:56] wipe 1072x1448 -> 6 列 REAGL          ← 条带扫过去
+    --   [15:42:57] IOCTL refreshPartialImp 1072x1448     ← 屏幕整体又黑闪一次
+    --   [15:43:01] wipe 1072x1448 -> 6 列 REAGL          ← 又扫一次（共三次）
+    -- 中间那一记是在「我们刚整屏推完、bb 与屏幕完全一致」的情况下重推同一幅像素，
+    -- 纯属白闪。判据只有一条：**3 秒内我自己推过整屏**，且这次区域覆盖大半屏。
+    -- 窗口取 3 秒是因为条带本身要 1.6 秒才刷完，_repaint 那条补刷可能紧跟其后。
+    -- 小区域（时钟、状态栏、菜单）一概不动 —— 那些是真需要更新的。
+    local orig_partial_imp = Screen.refreshPartialImp
+    if type(orig_partial_imp) == "function" then
+        pcall(function()
+            Screen.refreshPartialImp = function(s, x, y, w, h, d)
+                -- 只认「看板正显示着」这一种情形，不碰唤醒后那 4 秒窗口 ——
+                -- 那几秒里用户可能正在翻页，吞掉一整屏就是页面不更新。
+                if this.shown and this:softRepaintEnabled()
+                    and this._self_flush_ts
+                    and (os.time() - this._self_flush_ts) <= 3 then
+                    local sw, sh = s:getWidth(), s:getHeight()
+                    if (w * h) >= (sw * sh * 0.8) then
+                        return
+                    end
+                end
+                return orig_partial_imp(s, x, y, w, h, d)
+            end
+        end)
+    end
+end
+
+--- 清残影：定时做一次真·整屏全刷（GC16 + FULL）。
+--- 这是唯一能真正洗掉电泳残影的办法 —— 柔化波形只写不清，攒久了会发灰。
+--- 周期给到 3 小时，一天顶多五次；换来的是其余所有刷新都不闪。
+--- 嫌太频繁就把「省电设置 → 全刷周期」调大，或直接关掉。
+function Dashboard:clearGhosting()
+    -- 这一次必须是真 GC16 全刷：柔化波形只写不清，残影只能靠清屏相位洗掉。
+    -- 用一个 3 秒有效的一次性标记，让两层柔化钩子放过接下来那一条 full
+    -- （_refresh 层不清标记，出口层真正发 ioctl 时才清）。
+    self._real_full_pending = os.time()
+    UIManager:setDirty(nil, "full")
+end
+
 --- 重建版面并重绘。
---- mode 决定刷新方式，默认 "full"（整屏闪一下，最干净）：
----   "full" → 跨日、转屏、唤醒、首次打开，内容整体变了，值得闪一次
----   "ui"   → 只是数值变了（天气拉到新数据），不闪、走局部刷新，残影交给定时全刷
+--- mode 决定刷新方式：
+---   "full" → 跨日、转屏、首次打开：内容整体变了，值得彻底刷一次
+---   "ui"   → 只是数值变了（天气拉到新数据），不闪、走局部刷新，残影交给定时清
+---   "wipe" → 唤醒 / 转屏 / 开板：整屏柔化刷，不反白（v2.72 起不再拆条）
+---   "soft" → 数值变化、重排之后：同上，只是语义上更「轻」
 --- 这个区分能把「每拉一次天气就闪一次屏」消掉，一天少闪几十次。
 function Dashboard:refreshLayout(mode)
-    if not self.shown then return end
+    if not self.shown then
+        return
+    end
     -- 菜单在屏幕上时重建会把它盖掉，先记下来等菜单关掉再重排
     if self.menu_open then
         self.relayout_pending = true
@@ -2819,7 +3297,21 @@ function Dashboard:refreshLayout(mode)
     -- 边界之外也一并盖住。
     -- _own_full：转屏静音窗口里也放行这一次，那是看板唯一该刷的那一刷。
     self._own_full = true
-    UIManager:setDirty(nil, mode or "full")
+    if self:softRepaintEnabled() then
+        -- v2.72：wipe / soft / nil 现在完全一样 —— 一次整屏柔化刷，不再拆条。
+        -- 以前无参默认走 setDirty(nil, "full")，等于每重建一次版面就闪一次 ——
+        -- 「打开看板后整体又闪一下」就是这么来的。
+        --
+        -- v2.74：返回值收进 _open_painted（「这一刷的像素是否已由我自己推到屏上」），
+        -- 给 brushTopStrip 判「还要不要补一记整屏」。**不能再用 _own_painted**：
+        -- 那个是转屏静音窗口的一次性记账，endRotateMute（main.lua:3398）用完就清成
+        -- nil，0.9 秒后的落地检查读到 nil 就误判成「开板整屏没落地」，于是又推一遍
+        -- —— v2.73 真机日志里 15:43:01 那第二次 wipe 就是这么来的。
+        self._open_painted = self:softFullRefresh(mode == "wipe" and "wipe" or "soft")
+    else
+        UIManager:setDirty(nil, mode or "full")
+        self._open_painted = false
+    end
     self._own_full = nil
 end
 
@@ -2828,7 +3320,7 @@ end
 --- 为什么需要：`ui:onSetRotationMode()` 不只是转 framebuffer，它还会让底下的那个界面
 --- （ReaderView / FileManager）重排自己，重排完各自 `setDirty(nil, "full")` 整屏刷一次。
 --- 可看板是盖在最上面的全屏窗口，底层重排的结果用户根本看不见——那次整屏刷新换来的
---- 只有屏幕黑闪一下。真机打点（/tmp/dash_stack.log）看得很清楚：
+--- 只有屏幕黑闪一下。真机实测看得很清楚：
 ---   ReaderView:onSetRotationMode -> rotate() -> setDirty(nil,"full")   ← 黑闪一
 ---   看板 refreshLayout()          -> setDirty(nil,"full")              ← 黑闪二
 --- 两次相隔不到一秒，这就是「转一次方向闪两下」。
@@ -2854,7 +3346,10 @@ function Dashboard:beginRotateMute()
     -- 这一轮到底有没有真的整屏刷过。endRotateMute 靠它决定要不要补一次：
     -- 万一某个路径下看板那一次 full 没走到（被别的东西抢先、或者布局轮询超时），
     -- 屏幕上就会停在半新半旧，而静音已经把底层补救的刷新都吞了 —— 必须自己补。
+    -- v2.74：两个标记一起清。_own_painted 记「经 _refresh 落地的整屏」，
+    -- _open_painted 记「看板自己直推 ioctl 的那一刷有没有落地」，后者才是真凭据。
     self._own_painted = false
+    self._open_painted = false
     UIManager._refresh = function(mgr, mode, region, dither)
         local covers = (region == nil)
         if not covers and region then
@@ -2865,8 +3360,12 @@ function Dashboard:beginRotateMute()
             logger.dbg("dashboard: 转屏期间丢弃底层整屏刷新", mode)
             return
         end
-        if self._mute_full and self._own_full and covers and mode == "full" then
+        -- 这里不能限定 mode == "full"：v2.71 起看板自己那一刷根本不走 _refresh
+        -- （自己画 bb + 柔化直推），按老条件 _own_painted 永远是 false，
+        -- endRotateMute 就判定「这一轮一次整屏都没刷过」，1.5 秒后补一记整屏 full。
+        if self._mute_full and self._own_full and covers then
             self._own_painted = true
+            self._open_painted = true
         end
         return orig(mgr, mode, region, dither)
     end
@@ -2881,7 +3380,10 @@ end
 --- 而且 close() 是在 self.shown = false **之前**调它的，只看 shown 会误判。
 function Dashboard:endRotateMute(opts)
     if not self._mute_full then return end
-    local need_paint = self.shown and not self._own_painted
+    -- v2.74：判据用 _open_painted（refreshLayout 那一刷的返回值）。
+    -- _own_painted 只反映「经 _refresh 落地的整屏」，看板自己是直推 ioctl 的，
+    -- 用它判会次次都误以为没刷过，白补一记。
+    local need_paint = self.shown and not self._open_painted
         and not (opts and opts.no_paint)
     if self._orig_refresh then UIManager._refresh = self._orig_refresh end
     self._mute_full = false
@@ -2896,7 +3398,8 @@ function Dashboard:endRotateMute(opts)
     -- 补的这一次是全窗口栈重画，转屏后画面必然完整。
     if need_paint then
         logger.warn("dashboard: 转屏期间没有整屏刷新过，补一次")
-        self:refreshLayout()
+        -- v2.72：补的这一次也走柔化整屏，别用整屏 full 把刚省下的黑闪又还回去
+        self:refreshLayout("wipe")
     end
     self._own_painted = nil
 end
@@ -2906,7 +3409,7 @@ end
 --- v2.64 之前这里是「先 refreshLayout() 画一次，再 scheduleIn(1.2) 补排一次」，
 --- 两次都是整屏 full 刷新 —— 真机上就是转一次方向黑闪两下，间隔约 1 秒。
 --- 那 1.2 秒是当初以为「转屏后 Screen 的宽高要等一拍才互换」才加的，
---- 实测（/tmp/dash_paint.log 打点 + ffi/framebuffer.lua:454）不是这样：
+--- 实测（对照 ffi/framebuffer.lua:454）不是这样：
 --- fb:setRotationMode 里 bb:rotateAbsolute 是同步的，getWidth/getHeight
 --- 在 setRotationMode 返回时就已经互换了，第二次补排画的跟第一次一模一样。
 ---
@@ -2916,7 +3419,10 @@ end
 function Dashboard:relayoutAfterRotate(rotated)
     if not self.shown then return end
     if not rotated then
-        self:refreshLayout()
+        -- v2.72：转屏（含「不真的转、只换版式」）走整屏柔化刷。原来这里是
+        -- refreshLayout() 无参 → 默认 "full" → GC16 + FULL，整屏反白，
+        -- 这就是「转一次方向黑闪一下」的那一下。
+        self:refreshLayout("wipe")
         UIManager:scheduleIn(1.5, function() self:endRotateMute() end)
         return
     end
@@ -2928,7 +3434,8 @@ function Dashboard:relayoutAfterRotate(rotated)
         if not self.shown then return end
         tries = tries + 1
         if self:screenIsLandscape() == expect_landscape or tries > 20 then
-            self:refreshLayout()
+            -- v2.72：同上，转屏这一刷走整屏柔化刷，不再整屏反白
+            self:refreshLayout("wipe")
             -- 再等 1.5 秒才解除静音：底层界面迟到的整屏刷新（readerrolling 的
             -- handleRenderingDelayed、readerview 的第二次 recalculate）会在转屏后
             -- 半秒到一秒才到，窗口开小了照样补一次黑闪。真机上 SWITCH-2 就是这么漏的。
@@ -3707,6 +4214,28 @@ end
 --- 所以这里改成自己动手：TouchMenu 调 callback 时会把菜单实例作为参数传进来，
 --- 拿住它直接 UIManager:close()——同步执行、一定生效——然后再转屏重排。
 --- 菜单关闭与转屏之间不再有任何异步环节。
+--- 切换界面配色（浅灰卡片风 / 报纸黑白风）。
+---
+--- 切完必须整屏重绘一次：纸底、框线、文字色全变了，留着旧画面就是一半灰一半白。
+--- 顺序要紧：先撤菜单、把 menu_open 清掉，再 refreshLayout —— 否则 refreshLayout
+--- 看到 menu_open 会挂起（relayout_pending），用户看到的是「菜单关了但画面还是旧的」。
+function Dashboard:setUiStyle(name, menu)
+    G_reader_settings:saveSetting("dashboard_ui_style", name)
+    if G_reader_settings.flush then G_reader_settings:flush() end
+    applyUiStyle(name)
+    if menu then
+        self._closed_menu = menu
+        pcall(function() UIManager:close(menu) end)
+        self.menu = nil
+        self.menu_open = false
+        self.relayout_pending = false
+    end
+    if self.shown then
+        self:refreshLayout("wipe")
+    end
+    return true
+end
+
 function Dashboard:setOrientationFromMenu(mode, menu)
     -- 从 KOReader 主菜单里进来时既没有看板菜单、也没有 menu 实参，走普通路径
     -- （含「看板没打开」的处理）。判断条件是「两者都没有」而不是只看 menu_open：
@@ -5664,7 +6193,7 @@ function Dashboard:compAirDetail(ctx, w, h, k)
                     Meter:new{
                         dimen = Geom:new{ w = cell_need, h = bar_h },
                         ratio = d.ratio,
-                        track = RULE_SOFT,
+                        track = TRACK,
                         color = INK1,
                     },
                 }
@@ -6360,8 +6889,12 @@ function Dashboard:fetchWeather(manual)
             })
         end
         if self.shown then
-            -- 只是数值更新：局部刷新即可，不必整屏闪一下
-            self:refreshLayout("ui")
+            -- 开板那一下的自动拉取通常几秒后就回来。这时版面刚画完，重新整屏推一遍
+            -- 只会让用户看到「刚变完又刷了一下」；数值等差到下一拍 tick 自然带出来。
+            local just_opened = self._open_ts and (os.time() - self._open_ts) < 6
+            if manual or not just_opened then
+                self:refreshLayout("soft")
+            end
         end
     end)
 end

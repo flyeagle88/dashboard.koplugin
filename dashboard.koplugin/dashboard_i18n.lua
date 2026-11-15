@@ -130,6 +130,9 @@ local EN = {
     ["休眠时显示看板（屏保）"] = "Show dashboard while asleep (screensaver)",
     -- v2.60 顶层分成六组后的组名（原来是 15 条平铺，超过一页就会翻）
     ["外观"] = "Appearance",
+    ["界面配色"] = "UI theme",
+    ["浅灰卡片风"] = "Card grey",
+    ["报纸黑白风"] = "Newsprint",
     ["地点与天气"] = "Location & weather",
     ["内容"] = "Content",
     ["显示与省电"] = "Display & power",
@@ -140,6 +143,7 @@ local EN = {
     ["时钟刷新"] = "Clock refresh",
     ["天气更新"] = "Weather update",
     ["全刷周期"] = "Full refresh",
+    ["清残影周期"] = "Ghost clearing",
     ["低电保护"] = "Low battery guard",
     ["只在触摸时刷新"] = "Only on touch",
     ["%d 分钟"] = "%d min",

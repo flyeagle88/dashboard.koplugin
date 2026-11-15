@@ -231,6 +231,9 @@ local timers = {}
 -- setDirty 调用记录：用来钉住「转一次方向只整屏刷一次」。
 -- 故意用全局：主 chunk 的 200 个 local 槽位已经用满了，再加一个 local 就编译不过。
 STUB_DIRTY_CALLS = {}
+-- v2.71：柔化刷新绕过了 UIManager（自己画 bb + mech_refresh(GL16)），
+-- 所以另记一份「真实 ioctl」的账，否则断言只看 setDirty 会以为什么都没刷。
+STUB_FLUSHES = {}
 local standby = 0
 
 -- 绘制原语：与真机 ffi/blitbuffer.lua 的签名逐一对齐。
@@ -443,6 +446,9 @@ function UIManager:setDirty(widget, mode, region)
     -- 只记 full，否则后面一条无区域的 ui 刷新会把记录冲成 nil，断言就失效了。
     if tostring(mode) == "full" then
         STUB_LAST_FULL_REGION = region and { x = region.x, y = region.y, w = region.w, h = region.h } or nil
+    elseif tostring(mode) == "[partial]" then
+        -- v2.70：顶部补刷改成不反白的 "[partial]"，区域单独记一份
+        STUB_LAST_STRIP_REGION = region and { x = region.x, y = region.y, w = region.w, h = region.h } or nil
     end
     log("setDirty mode=%s", tostring(mode))
     if widget and widget.paintTo then widget:paintTo(fake_bb, 0, 0) end
@@ -662,6 +668,58 @@ local screen = {
     getWidth = function() return (rotation % 2 == 1) and SH or SW end,
     getHeight = function() return (rotation % 2 == 1) and SW or SH end,
 }
+-- v2.72：柔化刷新要的底层接口。mech_refresh 是 framebuffer_mxcfb 上的真接口，
+-- 第二个参数 is_flashing 必须为 false，第三个参数必须是「本机自己不闪的波形」，
+-- 这里如实记账，断言就能钉住「到底用什么波形推的」。
+--
+-- waveform_partial 必须照着真机填：PW3 是 REAGL(8)。
+-- 断言里一律对比 screen.waveform_partial 而不是写死 8/5 —— 换机型（或以后
+-- 改成别的取值）时测试自动跟着走，不会因为常量变了就误报。
+screen.waveform_partial = 8   -- PW3 / isREAGL=yes：REAGL
+screen.bb = fake_bb   -- 与 setDirty 桩同一个假 blitbuffer，paintTo 才不会炸
+screen.alignment_constraint = 16
+function screen:beforePaint() end
+function screen:afterPaint() end
+function screen:mech_refresh(flashing, waveform, x, y, w, h)
+    STUB_FLUSH_SEQ = (STUB_FLUSH_SEQ or 0) + 1
+    STUB_FLUSHES[#STUB_FLUSHES + 1] = {
+        seq = STUB_FLUSH_SEQ,
+        flashing = flashing and true or false,
+        waveform = waveform,
+        x = x, y = y, w = w, h = h,
+    }
+end
+-- v2.72：柔化刷新绕过了 setDirty（自己画 bb + mech_refresh 直推），
+-- 「这一段时间里有没有确认过整屏」就不能再数 STUB_DIRTY_CALLS 的 full 了。
+-- 用序号划界，问真实 ioctl。
+--
+-- v2.76：条带已实测证伪并删除（362 条 × 453ms = 164s，拆条只会变成 N × 一次整屏）。
+-- 所以「确认过整屏」又回到一条：一次通栏、不反白的整屏推送。判据：
+-- 划界之后必须存在 x=0,y=0,w>=W,h>=H 且波形 = 本机 partial、flashing=false 的推送。
+-- 写成全局函数：主 chunk 的 local 槽位已贴着 200 上限。
+STUB_HAS_FULL_FLUSH = function(mark)
+    mark = tonumber(mark) or 0
+    local H, W = screen.getHeight(), screen.getWidth()
+    -- 划界之后不许有任何带清屏相位的推送
+    for i = 1, #STUB_FLUSHES do
+        local f = STUB_FLUSHES[i]
+        if type(f.seq) == "number" and f.seq > mark then
+            if f.flashing or f.waveform ~= screen.waveform_partial then return false end
+        end
+    end
+    -- 必须有一次通栏整屏
+    for i = #STUB_FLUSHES, 1, -1 do
+        local f = STUB_FLUSHES[i]
+        if type(f.seq) ~= "number" or f.seq <= mark then break end
+        if not f.flashing and f.waveform == screen.waveform_partial
+            and f.x == 0 and f.y == 0
+            and (f.w or 0) >= W and (f.h or 0) >= H then
+            return true
+        end
+    end
+    return false
+end
+function screen:refreshWaitForLast() end
 if not _G.STUB_NO_ROTATION then
     screen.getRotationMode = function() return rotation end
     screen.setRotationMode = function(_, mode) rotation = tonumber(mode) or 0 end
@@ -1382,16 +1440,56 @@ if not instance.screensaver_owned then
     print("[FAIL] 休眠时没有标记屏保归看板接管")
     os.exit(1)
 end
--- 唤醒必须返回 true，Kindle:outofScreenSaver 才会做一次全屏重绘
-if Screensaver:close() ~= true then
-    print("[FAIL] 唤醒时没有请求重绘（被接管的 close 必须返回 true）")
+-- v2.71：唤醒时看板自己已经刷过整屏了（条带擦除），不能再让 framework 补一次
+-- 整屏 full —— 那一下才是按电源键后最明显的黑闪，所以 close 必须返回 false。
+-- 柔化刷新绕过了 setDirty（自己画 bb + mech_refresh(GL16)），断言改看真实 ioctl。
+-- 注意：本文件主 chunk 的局部变量已贴着 200 上限，这里一个 local 都不能再加，
+-- 改用哨兵记录 + 全局计数。
+STUB_DIRTY_CALLS[#STUB_DIRTY_CALLS + 1] = "WAKE_MARK"
+STUB_FLUSHES[#STUB_FLUSHES + 1] = { waveform = "WAKE_MARK" }
+if Screensaver:close() ~= false then
+    print("[FAIL] 唤醒时仍让 framework 补整屏 full（v2.70 起看板自己刷过了）")
     os.exit(1)
+end
+STUB_WAKE_FLUSHES = 0
+STUB_WAKE_FULLS = 0
+for i = #STUB_FLUSHES, 1, -1 do
+    if STUB_FLUSHES[i].waveform == "WAKE_MARK" then break end
+    STUB_WAKE_FLUSHES = STUB_WAKE_FLUSHES + 1
+    if STUB_FLUSHES[i].flashing or STUB_FLUSHES[i].waveform ~= screen.waveform_partial then
+        print("[FAIL] 唤醒重绘没用本机的不闪波形（波形="
+            .. tostring(STUB_FLUSHES[i].waveform) .. "，应为 "
+            .. tostring(screen.waveform_partial) .. "）")
+        os.exit(1)
+    end
+    -- 唤醒整屏推几次？每多推一次就多等一个完整波形周期（REAGL 约 400~500ms），
+    -- 用户按完电源键站在那儿等，多推 3 次就是一秒多的「怎么还没好」。
+    local fw = STUB_FLUSHES[i]
+    if fw.x == 0 and fw.y == 0 and fw.w and fw.h
+        and fw.w >= screen.getWidth() and fw.h >= screen.getHeight() then
+        STUB_WAKE_FULLS = STUB_WAKE_FULLS + 1
+    end
+end
+if STUB_WAKE_FLUSHES == 0 then
+    print("[FAIL] 唤醒时看板没自己刷屏（屏幕会停在屏保帧上）")
+    os.exit(1)
+end
+if STUB_WAKE_FULLS > 1 then
+    print(string.format("[FAIL] 唤醒整屏推了 %d 次（应为 1 次）", STUB_WAKE_FULLS))
+    os.exit(1)
+end
+for i = #STUB_DIRTY_CALLS, 1, -1 do
+    if STUB_DIRTY_CALLS[i] == "WAKE_MARK" then break end
+    if STUB_DIRTY_CALLS[i] == "full" then
+        print("[FAIL] 唤醒过程中又排了一次整屏 full（会黑闪）")
+        os.exit(1)
+    end
 end
 if Device.screen_saver_mode then
     print("[FAIL] 唤醒后 screen_saver_mode 没有复位")
     os.exit(1)
 end
-EVENTS[#EVENTS + 1] = "== 休眠（看板已打开）：复用当前画面，唤醒请求全屏重绘 =="
+EVENTS[#EVENTS + 1] = "== 休眠（看板已打开）：复用当前画面，唤醒走条带擦除不反白 =="
 
 -- ============ 点按展开：坐标命中 + 列表菜单 ============
 -- 摆放位置靠「绘制时记录」而不是「按布局算」：版心居中、留白、间距拉伸都会
@@ -1546,10 +1644,14 @@ end
 instance:open()
 EVENTS[#EVENTS + 1] = "== 重新 open() 继续后续检查 =="
 
--- v2.67：open 之后要补一刀「只刷顶部一条」，用来擦 Kindle 原生状态栏的残留。
--- 钉两件事：① 确实补了；② region 是「宽 = 屏宽、高 < 屏高」——退化成整屏就白折腾了。
+-- v2.77：open 之后那一刀「只刷顶部一条」已按用户要求取消（它本身也是一个完整的
+-- 450ms 波形周期，一开板就翻倍）。这里钉两件事：
+--   ① 0.9 秒的定时器仍然存在（它是「整屏到底有没有落地」的判定窗口，不能删）；
+--   ② 它**不再推窄条**：不许出现「宽=屏宽、高<屏高」的顶部条带推送。
+-- 整屏推送是允许的 —— 那是「开板整屏没落地」的兜底，缺了会停在半旧半新。
 do
     local before = #STUB_DIRTY_CALLS
+    local mark = STUB_FLUSH_SEQ or 0
     local fired = 0
     for i = #timers, 1, -1 do
         local t = timers[i]
@@ -1560,27 +1662,28 @@ do
         end
     end
     if fired == 0 then
-        print("[FAIL] open 之后没有补刷顶部状态栏")
+        print("[FAIL] open 之后那 0.9 秒的整屏落地检查窗口没了（转屏兜底会失效）")
         os.exit(1)
     end
-    local got_full = false
     for i = before + 1, #STUB_DIRTY_CALLS do
-        if STUB_DIRTY_CALLS[i] == "full" then got_full = true end
+        if STUB_DIRTY_CALLS[i] == "full" then
+            print("[FAIL] open 之后的补刷还在用 full 波形（会闪一条黑带）")
+            os.exit(1)
+        end
     end
-    if not got_full then
-        print("[FAIL] open 之后的补刷没有发出整刷（擦不掉状态栏残留）")
-        os.exit(1)
-    end
-    local r = STUB_LAST_FULL_REGION
-    if not r or not r.w or not r.h then
-        print("[FAIL] 补刷没带区域，等于整屏 full（要擦一条却闪整屏）")
-        os.exit(1)
-    end
-    if r.x ~= 0 or r.y ~= 0 or r.w ~= screen.getWidth() or r.h >= screen.getHeight() then
-        print(string.format("[FAIL] 补刷区域不是顶部一条：x=%s y=%s %sx%s（屏 %dx%d）",
-            tostring(r.x), tostring(r.y), tostring(r.w), tostring(r.h),
-            screen.getWidth(), screen.getHeight()))
-        os.exit(1)
+    for i = #STUB_FLUSHES, 1, -1 do
+        local f = STUB_FLUSHES[i]
+        if type(f.seq) ~= "number" or f.seq <= mark then break end
+        local is_strip = f.h and f.h < screen.getHeight()
+        if is_strip then
+            print(string.format("[FAIL] 顶部条带补刷又出现了：%sx%s+%s+%s（v2.77 已取消）",
+                tostring(f.w), tostring(f.h), tostring(f.x), tostring(f.y)))
+            os.exit(1)
+        end
+        if f.flashing or f.waveform ~= screen.waveform_partial then
+            print("[FAIL] 兜底失败：整屏推送没用本机不闪波形（波形=" .. tostring(f.waveform) .. "）")
+            os.exit(1)
+        end
     end
 end
 
@@ -1596,6 +1699,7 @@ do
         end
     end
     STUB_LAST_FULL_REGION = "unset"
+    STUB_FMARK = STUB_FLUSH_SEQ or 0
     instance:open()
     local mark = #STUB_DIRTY_CALLS
     local fired = 0
@@ -1615,11 +1719,14 @@ do
     for i = mark + 1, #STUB_DIRTY_CALLS do
         if STUB_DIRTY_CALLS[i] == "full" then got_full = true end
     end
-    if not got_full then
-        print("[FAIL] 会话首次开板没有发出整屏 full（首绘那一刷丢了就会停在半新半旧）")
+    -- v2.72 起首绘确认可能走柔化刷新（不经 setDirty），两路都算「确认过整屏」。
+    if not got_full and not STUB_HAS_FULL_FLUSH(STUB_FMARK) then
+        print("[FAIL] 会话首次开板没有发出整屏确认（首绘那一刷丢了就会停在半新半旧）")
         os.exit(1)
     end
-    if STUB_LAST_FULL_REGION ~= nil then
+    -- 只有走 setDirty 那一路才会记 STUB_LAST_FULL_REGION；走柔化刷新时整屏尺寸
+    -- 已由 STUB_HAS_FULL_FLUSH 校验过，这里只在记账为 nil 以外时追究。
+    if got_full and STUB_LAST_FULL_REGION ~= nil then
         local r = STUB_LAST_FULL_REGION
         print(string.format("[FAIL] 会话首次开板的补刷只擦了 %sx%s，应当整屏",
             tostring(r and r.w), tostring(r and r.h)))
@@ -1640,8 +1747,9 @@ do
     instance:open()
     -- 模拟：静音还开着，而 refreshLayout 那次整屏 full 没落地
     instance._mute_full = true
-    instance._own_painted = false
+    instance._open_painted = false
     STUB_LAST_FULL_REGION = "unset"
+    STUB_FMARK = STUB_FLUSH_SEQ or 0
     local mark = #STUB_DIRTY_CALLS
     local fired = 0
     for i = #timers, 1, -1 do
@@ -1653,21 +1761,21 @@ do
         end
     end
     instance._mute_full = nil
-    instance._own_painted = nil
+    instance._open_painted = nil
     if fired == 0 then
         print("[FAIL] 静音场景下没有补刷")
-        os.exit(1)
-    end
-    if STUB_LAST_FULL_REGION ~= nil then
-        print("[FAIL] 静音窗口里整屏没刷出去时，补刷仍是顶部一条——屏幕会停在半新半旧")
         os.exit(1)
     end
     local got_full2 = false
     for i = mark + 1, #STUB_DIRTY_CALLS do
         if STUB_DIRTY_CALLS[i] == "full" then got_full2 = true end
     end
-    if not got_full2 then
-        print("[FAIL] 静音场景的补刷没有发出 full")
+    if not got_full2 and not STUB_HAS_FULL_FLUSH(STUB_FMARK) then
+        print("[FAIL] 静音场景的补刷没有确认整屏（屏幕会停在半新半旧）")
+        os.exit(1)
+    end
+    if got_full2 and STUB_LAST_FULL_REGION ~= nil then
+        print("[FAIL] 静音窗口里整屏没刷出去时，补刷仍是顶部一条——屏幕会停在半新半旧")
         os.exit(1)
     end
     EVENTS[#EVENTS + 1] = "== 静音窗口里整屏没刷出去：补刷自动升级为整屏 =="
@@ -1871,6 +1979,7 @@ end
 -- Kindle 没有重力感应、Screen 尺寸不变，所以滑完还是原来那套（提示恒为「竖屏」）
 local layout_before = instance.layout_landscape
 STUB_DIRTY_BEFORE = #STUB_DIRTY_CALLS
+STUB_FMARK = STUB_FLUSH_SEQ or 0     -- 真实 ioctl 的界桩：只数这次转屏之后的推送
 STUB_STACK_BEFORE = #UIManager._window_stack
 if side_zone.handler({ direction = "east" }) ~= true then
     print("[FAIL] 左右滑动没有响应")
@@ -1912,8 +2021,38 @@ STUB_CHECK_ONE_FULL = function(before)
     for i = before + 1, #STUB_DIRTY_CALLS do
         if STUB_DIRTY_CALLS[i] == "full" then full_count = full_count + 1 end
     end
-    if full_count ~= 1 then
-        print(string.format("[FAIL] 切换方向后整屏刷新了 %d 次（应为 1 次，多了就是黑闪多次）", full_count))
+    -- 整屏 full 一次都不许排：排了就是整屏反白 = 黑闪（这条从 v2.66 起一直有效）。
+    if full_count ~= 0 then
+        print(string.format("[FAIL] 切换方向后仍出现 %d 次整屏 full（黑闪）", full_count))
+        os.exit(1)
+    end
+    -- v2.76：条带已删（实测每条 453ms，拆条 = N × 一次整屏）。转屏 = **恰好一次**
+    -- 整屏 REAGL 推送。断言：
+    --   · 本次转屏（以 STUB_FMARK 划界）每一次真实推送都必须是「不 flashing +
+    --     本机 partial 波形」——带清屏相位就是黑闪；
+    --   · 必须有一次通栏整屏（0,0,W,H），否则屏幕会停在旧方向的画面上；
+    --   · 整屏推送只能有一次 —— 每多一次就多约 450ms，用户能明显感到卡。
+    local wholes = 0
+    local H, W = screen.getHeight(), screen.getWidth()
+    for i = #STUB_FLUSHES, 1, -1 do
+        local f = STUB_FLUSHES[i]
+        if type(f.seq) ~= "number" or f.seq <= (STUB_FMARK or 0) then break end
+        if f.flashing or f.waveform ~= screen.waveform_partial then
+            print(string.format("[FAIL] 转屏推送带清屏相位：flashing=%s 波形=%s（应为 %s）",
+                tostring(f.flashing), tostring(f.waveform),
+                tostring(screen.waveform_partial)))
+            os.exit(1)
+        end
+        if f.x == 0 and f.y == 0 and (f.w or 0) >= W and (f.h or 0) >= H then
+            wholes = wholes + 1
+        end
+    end
+    if wholes == 0 then
+        print("[FAIL] 转屏没有整屏推送（屏幕会停在旧方向的画面上）")
+        os.exit(1)
+    end
+    if wholes > 1 then
+        print(string.format("[FAIL] 转屏整屏推了 %d 次（每次约 450ms，多推一次就多卡一次）", wholes))
         os.exit(1)
     end
 end
@@ -1980,20 +2119,28 @@ do
         print("[FAIL] 解除静音后状态没清干净")
         os.exit(1)
     end
-    -- 万一这一轮一次整屏 full 都没发出去（布局轮询超时、root 没建成），
+    -- 万一这一轮一次整屏刷新都没发出去（布局轮询超时、root 没建成），
     -- 解除时必须自己补一次，否则屏幕停在半新半旧，而底层补救刷新已被吞掉。
+    -- v2.70：补的这一次也走柔化（"[partial]"），且绝不能再是整屏 full。
     instance:beginRotateMute()
-    local full_before = 0
-    for i = 1, #STUB_DIRTY_CALLS do
-        if STUB_DIRTY_CALLS[i] == "full" then full_before = full_before + 1 end
-    end
+    local rot_mark = #STUB_DIRTY_CALLS
+    STUB_FLUSHES[#STUB_FLUSHES + 1] = { waveform = "ROT_MARK" }
     instance:endRotateMute()
-    local full_after = 0
-    for i = 1, #STUB_DIRTY_CALLS do
-        if STUB_DIRTY_CALLS[i] == "full" then full_after = full_after + 1 end
+    local soft_add, full_add = 0, 0
+    -- v2.71：补刷走 GL16 直推，不再经过 setDirty，改数真实 ioctl
+    for i = #STUB_FLUSHES, 1, -1 do
+        if STUB_FLUSHES[i].waveform == "ROT_MARK" then break end
+        soft_add = soft_add + 1
     end
-    if full_after ~= full_before + 1 then
-        print(string.format("[FAIL] 转屏期间没整屏刷过时没补刷（%d -> %d）", full_before, full_after))
+    for i = rot_mark + 1, #STUB_DIRTY_CALLS do
+        if STUB_DIRTY_CALLS[i] == "full" then full_add = full_add + 1 end
+    end
+    if soft_add < 1 then
+        print(string.format("[FAIL] 转屏期间没刷过时没补刷（GL16 推送 %d 次，应为 1）", soft_add))
+        os.exit(1)
+    end
+    if full_add ~= 0 then
+        print("[FAIL] 转屏补刷用了整屏 full（会黑闪）")
         os.exit(1)
     end
 end
@@ -2327,7 +2474,8 @@ EVENTS[#EVENTS + 1] = "== tick 间隔异常（休眠）后自动重建版面 =="
         fail("退避清零后仍不重试，天气会一直空着")
     end
 
-    -- 5) 省电菜单结构：4 组，各自的选项数与预设一致
+    -- 5) 省电菜单结构：4 组（v2.78 删掉了「柔化刷新」开关，它已恒开），
+    --    各组的选项数与预设一致
     local pm = instance:genPowerMenu()
     local want = { 6, 4, 5, 5 }
     if #pm ~= 4 then
@@ -3362,8 +3510,8 @@ for _, it in ipairs(menu_items) do
     if it.text == T("外观") then layout_item = it end
     if it.text and it.text:find("Language", 1, true) then lang_item = it end
 end
-if not layout_item or #layout_item.sub_item_table ~= 7 then
-    print("[FAIL] 外观菜单缺失或项数不对：应为版式 3 项 + 布局 4 项")
+if not layout_item or #layout_item.sub_item_table ~= 8 then
+    print("[FAIL] 外观菜单缺失或项数不对：应为版式 3 项 + 界面配色 1 项 + 布局 4 项")
     os.exit(1)
 end
 if not lang_item or #lang_item.sub_item_table ~= 3 then
@@ -3376,8 +3524,35 @@ for i = 1, 3 do
         os.exit(1)
     end
 end
--- 层级：外观 → 竖屏布局（第 4 项）→ A 区 → 具体组件项
-local zone_a = layout_item.sub_item_table[4].sub_item_table
+-- 层级：外观 → 界面配色（第 4 项，v2.78 新增）→ 两套风格
+-- 不新增顶层 local：主 chunk 的 local 槽位已经贴着 Lua 的 200 上限
+if not layout_item.sub_item_table[4].sub_item_table
+    or #layout_item.sub_item_table[4].sub_item_table ~= 2 then
+    print("[FAIL] 界面配色应有「浅灰卡片风 / 报纸黑白风」两项")
+    os.exit(1)
+end
+for _, it in ipairs(layout_item.sub_item_table[4].sub_item_table) do
+    if not it.checked_func or not it.callback then
+        print("[FAIL] 界面配色项缺少勾选或回调：" .. tostring(it.text))
+        os.exit(1)
+    end
+end
+-- v2.78：切到「报纸黑白风」后整屏重绘不能崩。
+-- 墨阶从 cdata 换成另一个 cdata（0xFF / 0x00），绘制路径上任何对颜色的假设
+-- （比如拿它做字符串拼接、或者当成数字比较）都会在这里炸出来。
+do
+    local okp, errp = pcall(function()
+        instance:setUiStyle("paper", nil)
+        if instance.shown then instance:refreshLayout("wipe") end
+    end)
+    if not okp then
+        print("[FAIL] 切到报纸黑白风后重绘失败：" .. tostring(errp))
+        os.exit(1)
+    end
+    pcall(function() instance:setUiStyle("card", nil) end)
+end
+-- 层级：外观 → 竖屏布局（第 5 项）→ A 区 → 具体组件项
+local zone_a = layout_item.sub_item_table[5].sub_item_table
 if #zone_a ~= 3 then
     print("[FAIL] 竖屏布局应有 A/B/C 三个区，实际 " .. #zone_a)
     os.exit(1)
