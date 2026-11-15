@@ -7,7 +7,7 @@
 > A sleeping Kindle usually shows one book cover, or a plain "Sleep". Replace it, and that 300 ppi e-ink panel stops sitting idle.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.60-blue.svg" alt="Version 2.60">
+  <img src="https://img.shields.io/badge/version-3.0-blue.svg" alt="Version 3.0">
   <img src="https://img.shields.io/badge/KOReader-plugin-blueviolet.svg" alt="KOReader plugin">
   <img src="https://img.shields.io/badge/Kindle-jailbroken-lightgrey.svg" alt="Jailbroken Kindle">
   <img src="https://img.shields.io/badge/dependencies-none-brightgreen.svg" alt="No dependencies">
@@ -26,10 +26,10 @@
 
 <table align="center">
   <tr>
-    <td align="center"><b>🧩 15 widgets</b><br/><sub>three boxes, mix freely</sub></td>
+    <td align="center"><b>🧩 16 widgets</b><br/><sub>three boxes, mix freely</sub></td>
     <td align="center"><b>🌍 81 cities · 43 zones</b><br/><sub>34 in China · 47 overseas</sub></td>
     <td align="center"><b>⏱️ 5 minutes</b><br/><sub>default clock step</sub></td>
-    <td align="center"><b>🔋 ~288 refreshes</b><br/><sub>per day, by default</sub></td>
+    <td align="center"><b>⚡ 0.45 s</b><br/><sub>one full-screen pass, no inversion</sub></td>
   </tr>
 </table>
 
@@ -90,7 +90,7 @@ their own arrangement, switchable under Appearance in the menu.
   <img src="preview/en/landscape-1.png" width="410" alt="Landscape dashboard">
 </p>
 
-<p align="center"><sub>Rendered at exact device pixel size — these are not photos. The real panel is 300 ppi e-ink, closer to print.</sub></p>
+<p align="center"><sub>Rendered at exact device pixel size — these are not photos. The real panel is 300 ppi e-ink, closer to print. Shown in the default Card grey theme; Newsprint is covered in the next section.</sub></p>
 
 The same machine can be arranged in many ways:
 
@@ -100,21 +100,43 @@ The same machine can be arranged in many ways:
 
 ---
 
-## 🧩 Three boxes, fifteen things
+## 🎨 Refresh and theme
+
+An e-ink refresh costs the same **no matter how large the area is**. The panel sweeps the whole glass from the previous frame to the next; updating four rows takes the same number of passes as updating all of it. Measured on the device: one commit takes a fixed **0.45 s** — the same order as turning a page in KOReader.
+
+So this version drops the "wave sweeping across the screen" idea: that needs one commit per stripe, and N stripes cost N × 0.45 s — four hundred of them would take over three minutes. There is now exactly one: **the whole screen at once, with no inversion**. The screen never flashes black and back; it simply presses down once.
+
+What is left of the flicker comes from mid-greys. A grey has to stop at an exact potential, so the waveform modulates across several frames and overshoots; with a large grey field repainting together, it reads as the whole area dimming. Hence two palettes:
+
+| Theme | Surface | During a refresh |
+|---|---|---|
+| **Card grey** (default) | 0xEE paper with white cards; depth comes from card vs paper | A light overall dim, already subtle |
+| **Newsprint** | Pure white with black rules and black type, two levels only | Large white areas barely move, only black ink changes — the calmest |
+
+Switch under Appearance → UI theme; it applies and repaints at once. If any flicker bothers you, use Newsprint — the cost is a harder, less soft look.
+
+The reverse does not work: **never black background with white type**. Black↔white is the largest jump of all.
+
+---
+
+## 🧩 Three boxes, sixteen things
 
 Portrait and landscape are both three boxes (top / middle / bottom), each taking one item from a list:
 
 | Useful ones | What they show |
 |---|---|
 | Clock and weather | Big clock, with temperature, condition and feels-like on the right |
+| Big clock | Time only, at maximum size |
 | Lunar and solar term | Month 10 Day 4 · Year of the Horse · day 6 of Start of Winter · 10 days to Minor Snow |
 | Now reading | Cover, title, author, progress — it remembers where you stopped |
+| Today | Countdowns and to-dos on one card; the day at a glance |
 | Countdown | The pinned date as a big "18 days to go", plus three more below |
 | To-do | Today's list; finished items get a tick and turn grey |
 | Weather set | Big weather, today + 3 days, 7-day forecast, air quality detail, sun and moon |
 | Status set | Humidity / wind / AQI row, battery and WiFi, month calendar |
+| Side column | Landscape right-hand column, stacked: lunar date, solar-term progress, sun and air |
 
-Fifteen in total (grouped above) — fill the boxes however you like. Portrait and landscape keep separate
+Sixteen in total (grouped above) — fill the boxes however you like. Portrait and landscape keep separate
 arrangements, and one tap restores the defaults.
 
 Anything that *can* be a shape **is** a shape: humidity is a droplet, wind is a wind line, air quality is a dial,
@@ -162,15 +184,16 @@ Six groups on top, and every page fits one screen in both orientations — no pa
 
 | Group | What is inside |
 |---|---|
-| Appearance | Portrait · Landscape (rotate right) · Landscape (rotate left) · Portrait layout▸ · Landscape layout▸ · Copy portrait layout to landscape · Restore default layout |
+| Appearance | Portrait · Landscape (rotate right) · Landscape (rotate left) · UI theme▸ · Portrait layout▸ · Landscape layout▸ · Copy portrait layout to landscape · Restore default layout |
 | Location & weather | City▸ · Time zone▸ · Detect my location (by IP) · Weather service▸ · Refresh weather now |
 | Content | Countdown▸ · To-dos▸ |
 | Display & power | Show dashboard while asleep (screensaver) · Footer gesture hints · Relayout · Power saving▸ |
 | Language | Follow KOReader · 中文 · English |
 | Help | Gesture and path cheat sheet, with the current version in its title |
 
-▸ means there is another level. Switching orientation is on the first page of Appearance; what goes in a
-given box is under Appearance → Portrait layout / Landscape layout → box A/B/C → widget.
+▸ means there is another level. Switching orientation is on the first page of Appearance; the theme is
+Appearance → UI theme; what goes in a given box is under Appearance → Portrait layout / Landscape layout →
+box A/B/C → widget.
 
 ---
 
@@ -223,9 +246,11 @@ One thing to know: e-ink stops its CPU while asleep, so the picture is static �
 
 ### Power
 
-When it stays on, the power goes mostly into how often the screen refreshes. Defaults: the clock updates every **5 minutes**, weather every **1 hour**, and the whole screen flashes once an hour to clear ghosting.
+When it stays on, the power goes mostly into how often the screen refreshes. Defaults: the clock updates every **5 minutes**, weather every **1 hour**, and ghosting is cleared every **180 minutes** — roughly 288 screen updates a day.
 
-All of it is adjustable under Menu → "Display & power" → "Power saving". Push the clock to 10 or 30 minutes and the number of screen updates drops proportionally; pick "Only on touch" and it stops moving on its own — it corrects itself when you tap, and costs almost nothing.
+Clearing ghosts no longer inverts the screen: it pushes a mild full-screen waveform that is barely visible, and only every 8th time performs a real full refresh.
+
+All of it is adjustable under Menu → "Display & power" → "Power saving". Push the clock to 10 or 30 minutes and the number of screen updates drops proportionally; pick "Only on touch" and it stops moving on its own — it corrects itself when you tap, and costs almost nothing; turn ghost clearing off for a quieter screen, at the price of a faint afterimage when one layout stays up for hours.
 
 Below 10% battery it throttles by itself (clock drops to a 30-minute step, weather and full refresh stop) until you plug in. That threshold can be turned off.
 
@@ -245,6 +270,7 @@ Below 10% battery it throttles by itself (clock drops to a 30-minute step, weath
 | Clock stuck at the sleep time | Waking rebuilds the layout; if it never moves, check `crash.log` |
 | Cannot swipe up to exit | Confirm you are on a current version; a `registerTouchZones` error in the log means KOReader is too old |
 | Layout unchanged after rotating | Pick it manually in menu → "Appearance" |
+| Refresh flicker still bothers you | Menu → "Appearance → UI theme" → "Newsprint" |
 
 More, including exact log strings: [DEVELOPMENT.md](DEVELOPMENT.md) (Chinese).
 
@@ -252,6 +278,7 @@ More, including exact log strings: [DEVELOPMENT.md](DEVELOPMENT.md) (Chinese).
 
 ## ⚠️ Known limits
 
+- Opening the board and rotating each cost one full-screen refresh (~0.5 s), during which the panel dims slightly. That is the physical floor of e-ink, not a stall.
 - Minutes only: a seconds hand on e-ink leaves permanent ghosting.
 - Long names are truncated with an ellipsis, not wrapped (single-line widget).
 - Weather requests are synchronous: offline, a refresh can stall for up to 20 seconds.
