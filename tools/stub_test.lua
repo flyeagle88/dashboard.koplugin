@@ -1455,6 +1455,59 @@ end)()
     EVENTS[#EVENTS + 1] = "== 时钟基准：无时区设备直接取钟面时间，默认回落北京/东八区 =="
 end)()
 
+-- ============ 页脚与「更新于」的天气时刻，必须和局部时钟同一个基准 ============
+-- v3.2 只改了 localNow()，页脚（hintLine）和「更新于」（updateLabel）还各自写着
+-- 「os.date("!%H:%M", ts + offset)」——在没有系统时区的机器上等于把偏移加了两遍。
+-- 真机现象：同一块屏上大钟 09:32，页脚 17:32，正好差一个时区。
+;(function()
+    local CD = package.loaded["dashboard_cities"]
+    local real_date = os.date
+    local function mock_no_tz()
+        os.date = function(fmt, t)
+            if fmt == "%z" then return "+0000" end
+            if fmt == "%Z" then return "UTC" end
+            return real_date(fmt, t)
+        end
+    end
+
+    local saved_hints = G_reader_settings:readSetting("dashboard_show_hints")
+    G_reader_settings:saveSetting("dashboard_show_hints", false)
+    local saved_weather = instance.weather
+    local ts = os.time()
+    instance.weather = { ts = ts }
+
+    -- 1) 无时区设备：钟面时间就是 os.time()，一点偏移都不能加
+    mock_no_tz()
+    local want = real_date("!%H:%M", ts)
+    local got_hint = instance:hintLine(nil)
+    if got_hint:sub(1, 5) ~= want then
+        print(string.format("[FAIL] 无时区设备的页脚天气时刻应为 %s，实际 %q（时区偏移加了两遍？）",
+            want, got_hint))
+        os.exit(1)
+    end
+    local got_label = instance:updateLabel({ tz = instance:getTz() })
+    if got_label:match("%d%d:%d%d") ~= want then
+        print(string.format("[FAIL] 无时区设备的「更新于」应为 %s，实际 %q", want, got_label))
+        os.exit(1)
+    end
+
+    -- 2) 有时区设备：这一条不能因为上一条而反过来漏加偏移
+    os.date = real_date
+    if CD.deviceHasTz() then
+        local want2 = real_date("!%H:%M", ts + instance:getTz().offset * 60)
+        local got2 = instance:hintLine(nil)
+        if got2:sub(1, 5) ~= want2 then
+            print(string.format("[FAIL] 有时区设备的页脚天气时刻应为 %s，实际 %q",
+                want2, got2))
+            os.exit(1)
+        end
+    end
+
+    instance.weather = saved_weather
+    G_reader_settings:saveSetting("dashboard_show_hints", saved_hints)
+    EVENTS[#EVENTS + 1] = "== 页脚/「更新于」的天气时刻与局部时钟同一基准 =="
+end)()
+
 -- ============ 升级迁移：v3.1 的 dashboard_tz 要接成本机时区 ============
 -- v3.1 及更早有两个键：`dashboard_tz` 是时钟显示用的、`dashboard_device_tz` 只在
 -- 无系统时区的设备上写。v3.2 合并成一个入口，如果直接把旧键丢掉，那些只在

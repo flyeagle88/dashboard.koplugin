@@ -223,6 +223,7 @@ and Africa. The interface itself is bilingual.
 - **Daylight saving is handled.** London, Paris, New York, Los Angeles, Sydney, Auckland and others shift by an hour under their local rules; Mexico and Brazil have abolished DST and use a fixed offset; Egypt and Morocco have irregular rules and are also fixed.
 - **Overseas cities use Open-Meteo for weather.** QWeather's air-quality endpoint only covers stations in China, so overseas coordinates get no AQI; those cities go straight to Open-Meteo (no key required) and the footer still names the source.
 - The header shows a plain offset such as `UTC+8` / `UTC-5`, and during DST it shows the offset actually in effect.
+- **The city and offset are centred in the header.** The Kindle stock status bar (time / battery / WiFi) is drawn straight onto the panel by the system and KOReader cannot cover it — and it repaints its own little patch once a minute. When the pair sat on the left, that patch kept erasing the top half of the city name. Centred, the top-left corner is left empty for the system clock: you may still see its small line there now and then, but it no longer covers anything.
 - **"Device time zone" is the board's only time-zone setting**: the clock, lunar date, moon phase and sunrise/sunset are all shown in it. Most Kindles never set a system time zone (`/etc/localtime` points at a file that does not exist), so this entry only appears under "Location & weather" when the device reports no system time zone. It defaults to Beijing time; getting it wrong shifts every time on the board. "Detect my location" sets it for you.
 
 On first run, before you have picked a city, the board follows the device time zone if the device reports one (a UTC+9 device gets Tokyo) and otherwise uses Beijing with UTC+8, so there is nothing to configure before it works.
@@ -288,6 +289,7 @@ More, including exact log strings: [DEVELOPMENT.md](DEVELOPMENT.md) (Chinese).
 - With the screensaver hook active, KOReader's native slide-to-unlock no longer appears — wake by touching the screen or pressing the power button.
 - Cover images are cached in `settings/dashboard_covers/` (latest 6 only); old ones are not deleted immediately when you switch books.
 - IP lookup is city-level and may land on a neighbouring city; fix it once by hand and it will not be changed again.
+- The Kindle stock status bar (time / battery) sometimes floats over the top-left corner — the system paints it straight onto the panel and KOReader cannot cover it. Tap the board to trigger a repaint and it clears.
 
 ---
 
