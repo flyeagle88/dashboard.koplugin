@@ -267,6 +267,21 @@ def city_check(lua):
         if not (-720 <= z["offset"] <= 780):
             bad.append(f"时区 {z['iana']} 偏移越界：{z['offset']}")
 
+    # 时钟基准的两个前提，缺了就是真机上整块偏移 8 小时：
+    #   1. main.lua 的 getDeviceTzIana() 硬编码回落 "Asia/Shanghai"，它必须真在表里
+    #   2. 判据函数 deviceHasTz() 必须在，否则 localNow 会走错分支
+    if "Asia/Shanghai" not in by_iana:
+        bad.append("时区表里没有 Asia/Shanghai：设备时区读不到时的回落值会失效")
+    if M.deviceHasTz is None:
+        bad.append("dashboard_cities 缺少 deviceHasTz()：localNow 无法判断设备有没有系统时区")
+    else:
+        # 本机 %z 非零（或 %Z 不是 UTC），应判为「设备有系统时区」
+        if not M.deviceHasTz():
+            bad.append("本机有时区却判成「设备没有系统时区」，localNow 会走错分支")
+    fallback_city = M.defaultCityName("Asia/Shanghai")
+    if fallback_city not in names:
+        bad.append(f"defaultCityName('Asia/Shanghai') 返回了不存在的城市：{fallback_city}")
+
     if bad:
         print(f"[FAIL] 城市/时区数据 {len(bad)} 处问题：")
         for b in bad[:10]:

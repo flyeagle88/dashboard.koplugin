@@ -223,8 +223,9 @@ and Africa. The interface itself is bilingual.
 - **Daylight saving is handled.** London, Paris, New York, Los Angeles, Sydney, Auckland and others shift by an hour under their local rules; Mexico and Brazil have abolished DST and use a fixed offset; Egypt and Morocco have irregular rules and are also fixed.
 - **Overseas cities use Open-Meteo for weather.** QWeather's air-quality endpoint only covers stations in China, so overseas coordinates get no AQI; those cities go straight to Open-Meteo (no key required) and the footer still names the source.
 - The header shows a plain offset such as `UTC+8` / `UTC-5`, and during DST it shows the offset actually in effect.
+- **"Device time zone"**: most Kindles never set a system time zone (`/etc/localtime` points at a file that does not exist), so the board can only treat the device clock reading as local time and uses this entry as the reference for converting to other cities. It defaults to Beijing time and only appears under "Place & weather" when the device reports no system time zone. Getting it wrong shifts every time on the board. "Detect my location" sets it for you.
 
-On first run, before you have picked a city, the board guesses one from the device time zone (a UTC+9 device gets Tokyo), so there is nothing to configure before it works.
+On first run, before you have picked a city, the board follows the device time zone if the device reports one (a UTC+9 device gets Tokyo) and otherwise uses Beijing with UTC+8, so there is nothing to configure before it works.
 
 ---
 

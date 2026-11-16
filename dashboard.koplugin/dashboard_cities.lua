@@ -328,8 +328,34 @@ function M.defaultCityName(iana)
     return "北京"
 end
 
+--- 设备是否真的提供了系统时区。
+---
+--- **这条判据决定了整个时钟算法走哪条路，别随手改。**
+---
+--- Kindle 上 `/etc/localtime` 常是指向 `/var/local/system/tz` 的断链（目标文件不存在），
+--- 于是系统时区退回 UTC：`%z` 恒为 `+0000`、`%Z` 恒为 `UTC`。
+--- 但它的 RTC 里存的是**本地钟面时间**——Kindle 原生界面直接把这个读数当本地时间显示，
+--- 所以在设备上看时间是准的，而 `os.time()` 却比真实 UTC 多出整整一个时区（用户实测快 8 小时）。
+---
+--- 结论：这类设备上 `os.time() + 城市偏移` 会重复加一次偏移，必须改走
+--- 「城市偏移 − 设备偏移」的相对换算（见 main.lua 的 localNow）。
+---
+--- 判据：`%z` 非零即认为时区有效；`%z` 为零时再看 `%Z`，只有 UTC/GMT/空才算「没配时区」。
+--- 真在零时区的设备（伦敦冬令时）`%Z` 是 GMT 而不是 UTC，仍会被判为无效——
+--- 代价是该设备默认城市取北京时间，但用户可以手动改，且绝不会出现整块偏移 8 小时。
+function M.deviceHasTz()
+    local ok, z = pcall(os.date, "%z")
+    if not ok or type(z) ~= "string" then return false end
+    if z ~= "" and z ~= "+0000" and z ~= "-0000" then return true end
+    local okn, name = pcall(os.date, "%Z")
+    if not okn or type(name) ~= "string" then return false end
+    name = name:upper()
+    return name ~= "" and name ~= "UTC" and name ~= "GMT"
+end
+
 --- 设备本地时区偏移（分钟）。读不到一律返回 nil，调用方自备默认值。
 --- 优先 os.date("%z")；个别平台（Kindle 某些固件）该字段为空，退回时间差法。
+--- 注意：返回 0 不代表「设备在 UTC」，需先用 deviceHasTz() 判断这个 0 是否可信。
 function M.deviceOffsetMinutes()
     local ok, s = pcall(os.date, "%z")
     if ok and type(s) == "string" then
@@ -355,6 +381,9 @@ end
 
 --- 按设备时区猜一个时区项，猜不到返回 nil（调用方回落到北京时间）
 function M.guessTimezone()
+    -- 设备没配时区时 %z 恒为 +0000，照着猜会得到「西欧 UTC+0」：
+    -- 默认城市就变成伦敦，时钟也跟着整块偏移。这种情况宁可不猜。
+    if not M.deviceHasTz() then return nil end
     local off = M.deviceOffsetMinutes()
     if not off then return nil end
     local best, best_d

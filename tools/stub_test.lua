@@ -1252,13 +1252,19 @@ end
         end
         return false
     end
+    -- 待办 / 倒数日的条数由用户自己往里加，翻页本来就是正常行为
+    -- （5 条待办 + 3 个日期分组头 + 添加 + 清除已完成 = 10 条）。
+    -- 这里只审由代码写死的菜单结构，不拿用户数据去卡上限。
+    local data_driven = { [T("待办事项")] = true, [T("倒数日")] = true }
     local function walk(tbl, where)
         if #tbl > 9 and any_sub(tbl) then
             print(string.format("[FAIL] %s 有 %d 条，超过横屏一页的 9 条", where, #tbl))
             os.exit(1)
         end
         for _, it in ipairs(tbl) do
-            if it.sub_item_table then walk(it.sub_item_table, where .. " › " .. it.text) end
+            if it.sub_item_table and not data_driven[it.text] then
+                walk(it.sub_item_table, where .. " › " .. it.text)
+            end
         end
     end
     walk(top, "顶层")
@@ -1341,6 +1347,86 @@ end)()
     -- 恢复默认，后面的中英文断言与出图用例都假定是北京
     instance:setTz("Asia/Shanghai")
     instance:setCity("北京")
+end)()
+
+-- ============ 时钟基准：设备有没有系统时区，算法要分两条路 ============
+-- 真机（KPW3）实测：/etc/localtime 是断链，%z 恒为 +0000、%Z 恒为 UTC，
+-- 而 RTC 里存的是本地钟面时间。此时若仍用「os.time() + 城市偏移」，
+-- 时钟会整块快出一个时区的量（用户实测快 8 小时）。
+-- 这里用 mock 的 os.date 造出那台设备，锁住相对换算的公式。
+;(function()
+    local CD = package.loaded["dashboard_cities"]
+    local real_date = os.date
+
+    -- 造一台 Kindle 式设备：时区字段恒为 +0000 / UTC
+    local function mock_no_tz()
+        os.date = function(fmt, t)
+            if fmt == "%z" then return "+0000" end
+            if fmt == "%Z" then return "UTC" end
+            return real_date(fmt, t)
+        end
+    end
+    local function restore_date() os.date = real_date end
+
+    -- 1) 判据本身
+    mock_no_tz()
+    if CD.deviceHasTz() then
+        print("[FAIL] %z=+0000 且 %Z=UTC 应判为「设备没有系统时区」")
+        os.exit(1)
+    end
+    if CD.guessTimezone() then
+        print("[FAIL] 设备没配时区时不该猜出时区（会猜成西欧 UTC+0 → 伦敦）")
+        os.exit(1)
+    end
+    restore_date()
+    if not CD.deviceHasTz() then
+        print("[FAIL] 本机 %z 非零时应判为「设备有系统时区」")
+        os.exit(1)
+    end
+
+    -- 2) 无时区设备的默认值：城市北京、时区东八区
+    mock_no_tz()
+    pcall(function() G_reader_settings:delSetting("dashboard_city") end)
+    pcall(function() G_reader_settings:delSetting("dashboard_tz") end)
+    pcall(function() G_reader_settings:delSetting("dashboard_device_tz") end)
+    if instance:getCityName() ~= "北京" then
+        print("[FAIL] 无时区设备的默认城市应为北京，实际 " .. tostring(instance:getCityName()))
+        os.exit(1)
+    end
+    if instance:getTzIana() ~= "Asia/Shanghai" then
+        print("[FAIL] 无时区设备的默认时区应为 Asia/Shanghai，实际 " .. tostring(instance:getTzIana()))
+        os.exit(1)
+    end
+
+    -- 3) 设备与城市同为北京：相对偏移为 0，时钟应等于设备钟面时间
+    --    （RTC 已经存的是本地时间，再 +8 就会快 8 小时）
+    local now = os.time()
+    local expect_local = real_date("!*t", now)
+    local got = instance:localNow()
+    if got.hour ~= expect_local.hour or got.min ~= expect_local.min then
+        print(string.format(
+            "[FAIL] 无时区设备选本地城市，时钟应等于钟面时间：实际 %02d:%02d，应为 %02d:%02d",
+            got.hour, got.min, expect_local.hour, expect_local.min))
+        os.exit(1)
+    end
+
+    -- 4) 城市换成纽约：相对北京慢 13 小时
+    instance:setTz("America/New_York")
+    local expect_ny = real_date("!*t", now + (-300 - 480) * 60)
+    got = instance:localNow()
+    if got.hour ~= expect_ny.hour then
+        print(string.format(
+            "[FAIL] 无时区设备选纽约应比钟面时间慢 13 小时：实际 %02d 点，应为 %02d 点",
+            got.hour, expect_ny.hour))
+        os.exit(1)
+    end
+
+    -- 5) 收尾：恢复真实 os.date 与默认城市，后面的用例都假定北京
+    restore_date()
+    instance:setTz("Asia/Shanghai")
+    instance:setCity("北京")
+    pcall(function() G_reader_settings:delSetting("dashboard_device_tz") end)
+    EVENTS[#EVENTS + 1] = "== 时钟基准：无时区设备走相对换算，默认回落北京/东八区 =="
 end)()
 
 -- 凭据来源与脱敏显示

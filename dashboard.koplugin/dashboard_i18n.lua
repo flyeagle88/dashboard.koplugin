@@ -142,7 +142,6 @@ local EN = {
     ["省电设置"] = "Power saving",
     ["时钟刷新"] = "Clock refresh",
     ["天气更新"] = "Weather update",
-    ["全刷周期"] = "Full refresh",
     ["清残影周期"] = "Ghost clearing",
     ["低电保护"] = "Low battery guard",
     ["只在触摸时刷新"] = "Only on touch",
@@ -164,6 +163,8 @@ local EN = {
     -- 时区菜单的分组：北美与南美同属一个「美洲」组，避免两组都是三四项
     ["美洲"] = "Americas",
     ["自动检测我的位置（按 IP）"] = "Detect my location (by IP)",
+    -- 设备自身读不到系统时区时（Kindle 常见）才出现的基准时区
+    ["设备所在时区"] = "Device time zone",
     ["已定位到：%s"] = "Located: %s",
     ["时区：%s"] = "Time zone: %s",
     ["定位失败：%s"] = "Location lookup failed: %s",
@@ -174,7 +175,6 @@ local EN = {
     ["返回内容无法解析"] = "Response could not be parsed",
     ["返回内容缺少坐标"] = "Response has no coordinates",
     ["服务拒绝了这次查询"] = "The lookup service refused this query",
-    ["版式（竖屏 / 横屏）"] = "Layout (portrait / landscape)",
     ["竖屏"] = "Portrait",
     ["横屏（向右转 90°）"] = "Landscape (rotate right)",
     ["横屏（向左转 90°）"] = "Landscape (rotate left)",
@@ -242,14 +242,11 @@ local EN = {
     ["本机计算"] = "on device",
     ["电量"] = "Battery",
     ["网络"] = "Network",
-    ["已连接"] = "Connected",
-    ["未连接"] = "Offline",
     ["未开启"] = "Wi-Fi off",
     ["充电中"] = "Charging",
     ["在读"] = "Now reading",
     ["暂无在读"] = "No book open",
     ["作者"] = "by",
-    ["页"] = "p",
     -- v2.61 在读卡扩展成读书仪表盘：头部相对时间 + 三栏统计。
     -- 「天前读过」这类整句走 TL() 二选一（英文语序不同，查表拼不出来），
     -- 这里只放三栏的短标签。
@@ -296,7 +293,6 @@ local EN = {
         "The date picker is unavailable. Please update KOReader.",
 
     -- 布局组件菜单
-    ["布局组件"] = "Layout components",
     ["竖屏布局"] = "Portrait layout",
     ["横屏布局"] = "Landscape layout",
     ["A 区（上）"] = "Zone A (top)",
