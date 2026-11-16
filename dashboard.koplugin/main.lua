@@ -266,7 +266,7 @@ end
 -- 版本号：显示在菜单「使用说明」那一项上。改动行为后一定同步改这里，
 -- 上机时一眼就能确认「装的到底是不是刚改的这份」（避免文件没覆盖到、
 -- 或者覆盖了但 KOReader 没重启，还在跑内存里的旧模块）。
-local DASHBOARD_VERSION = "3.3"
+local DASHBOARD_VERSION = "3.4"
 
 -- 唤醒宽限期：刚醒来的这几秒里先不拉天气。http.TIMEOUT 是 20 秒，三个接口
 -- 外加 LuaSec/socket.http 双通道，最坏能同步卡住一两分钟；而休眠之后天气必然过期，
@@ -4806,34 +4806,27 @@ function Dashboard:buildHeader(ctx, pad_lr)
 
     -- 左侧：城市名一档、时区一档，靠字号与颜色分层，不再用「·」串成一句。
     --
-    -- v3.3：整组**居中**而不是靠左。Kindle 的原生状态栏（时间/电量/WiFi）是 framework
-    -- 直接画在 fb0 上的，KOReader 盖不住它，而且它每分钟只重绘自己那一小块
-    -- （真机实测 x≈26–150、y≈30–62，只擦掉这一块里的旧像素）。靠左摆正好落在它那一块里，
-    -- 城市名的上半截被反复擦掉、只剩底部笔画（截图可证：只剩「天津」的两笔）。
-    -- 挪到中间以后那块空地留给系统钟，它爱怎么重绘都压不到看板的内容。
+    -- v3.3 曾把这一组改成居中，理由是「Kindle 原生状态栏每分钟重绘，把靠左的城市名
+    -- 上半截反复擦掉」——**那个理由是错的**，成立的基础是读 `/dev/fb0` 的像素：
+    -- framework 确实会把状态栏（时间/电量/WiFi）写进 fb0，但**不触发 e-ink 波形提交**，
+    -- 所以缓冲区里有、屏上没有（真机照片 vs 同刻抓帧已核对）。v3.4 恢复靠左。
     local min_fill = math.floor(16 * S)
     local tz = self:makeText(ctx, I18n.headerTz(ctx.tz), 17, { gray = true })
-    local right_w = right:getSize().w
-    local city_max = math.max(math.floor(80 * S),
-        avail - right_w - tz:getSize().w - min_fill * 2 - math.floor(10 * S))
+    local left_w = math.floor(avail - right:getSize().w - min_fill)
+    left_w = math.max(math.floor(avail * 0.35), left_w)
     local city = self:makeText(ctx, I18n.city(self:getCity()), 24,
-        { max_width = city_max, ellipsis = true })
-    local middle = HorizontalGroup:new{
+        { max_width = math.max(math.floor(80 * S), left_w - tz:getSize().w - math.floor(10 * S)),
+          ellipsis = true })
+    local left = HorizontalGroup:new{
         align = "center",
         city,
         mkPad(math.floor(10 * S), 1),
         tz,
     }
-    -- 优先按整条顶栏的几何中心摆；右侧图标太宽（充满电显示 100%）时向左让，
-    -- 至少留 min_fill 的空隙，别和电量贴在一起。
-    local mid_w = middle:getSize().w
-    local lfill = math.floor((avail - mid_w) / 2)
-    local room = avail - mid_w - right_w - min_fill
-    if lfill > room then lfill = math.max(0, room) end
-    local rfill = math.max(min_fill, avail - lfill - mid_w - right_w)
+    local fill = math.max(min_fill, avail - left:getSize().w - right:getSize().w)
     return HorizontalGroup:new{
         align = "center",
-        mkPad(pad_lr, 1), mkPad(lfill, 1), middle, mkPad(rfill, 1), right, mkPad(pad_lr, 1),
+        mkPad(pad_lr, 1), left, mkPad(fill, 1), right, mkPad(pad_lr, 1),
     }
 end
 
