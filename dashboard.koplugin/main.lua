@@ -266,7 +266,7 @@ end
 -- 版本号：显示在菜单「使用说明」那一项上。改动行为后一定同步改这里，
 -- 上机时一眼就能确认「装的到底是不是刚改的这份」（避免文件没覆盖到、
 -- 或者覆盖了但 KOReader 没重启，还在跑内存里的旧模块）。
-local DASHBOARD_VERSION = "3.1"
+local DASHBOARD_VERSION = "3.2"
 
 -- 唤醒宽限期：刚醒来的这几秒里先不拉天气。http.TIMEOUT 是 20 秒，三个接口
 -- 外加 LuaSec/socket.http 双通道，最坏能同步卡住一两分钟；而休眠之后天气必然过期，
@@ -1278,33 +1278,36 @@ end
 --- 菜单里不必为它长期占一个顶层位置。
 function Dashboard:genPlaceMenu()
     local items = {
+        -- 城市只决定天气用哪个地点，**不影响时钟**：想让时钟换时区，见下面的「本机时区」
         { text = T("选择城市"), sub_item_table = self:genCityMenu() },
-        { text = T("选择时区"), sub_item_table = self:genTzMenu() },
         {
             text = T("自动检测我的位置（按 IP）"),
             help_text = TL(
-                "联网查一次出口 IP 的大致位置，自动选最近的城市，并把时区一起改掉。\n"
+                "联网查一次出口 IP 的大致位置，自动选最近的城市，并把本机时区一起改掉。\n"
                 .. "查不到时已有设置保持不变，可以继续手动选。",
                 "Looks up the approximate location of this network once, then picks the\n"
-                .. "nearest city and its time zone. If it fails, your current settings\n"
-                .. "stay untouched and you can pick manually."),
+                .. "nearest city and the device time zone. If it fails, your current\n"
+                .. "settings stay untouched and you can pick manually."),
             callback = function() self:autoLocateCity() end,
         },
     }
     -- 只在设备自己没有系统时区时（Kindle 就是）才需要这一项：
-    -- 它是把「设备钟面时间」换算到别处的基准，配错了所有时间会整块偏移。
+    -- 它是把「设备钟面读数」换算成真实时间的唯一依据，配错了所有时间会整块偏移。
     -- 系统时区可读的设备上这一项改了也不生效，索性不显示，免得误导。
     if not CityData.deviceHasTz() then
         items[#items + 1] = {
-            text = T("设备所在时区"),
+            text = T("本机时区"),
             help_text = TL(
-                "这台设备实际所在的时区，看板以它为基准换算到你选的城市。\n"
+                "这台设备所在的时区，看板上所有时间（时钟、农历、月相、日出日落）都按它显示。\n"
                 .. "只有在这台设备读不到系统时区时才需要设——设错了所有时间会整块偏移。\n"
-                .. "在国内就是北京时间；用「自动检测我的位置」会一并设好。",
-                "The time zone this device is actually in; every clock on the board is\n"
-                .. "converted from it. Only needed when the device reports no system time\n"
-                .. "zone. Getting it wrong shifts every time by the difference. In China\n"
-                .. "this is Beijing time; \"Detect my location\" sets it for you."),
+                .. "在国内就是北京时间；用「自动检测我的位置」会一并设好。\n"
+                .. "它和「选择城市」互不影响：换城市只换天气的来源地，不会改时钟。",
+                "The time zone this device is in. Every time on the board (clock, lunar\n"
+                .. "date, moon phase, sunrise/sunset) is shown in it. Only needed when the\n"
+                .. "device reports no system time zone; getting it wrong shifts every time\n"
+                .. "by the difference. In China this is Beijing time; \"Detect my location\"\n"
+                .. "sets it for you. It is independent of \"City\": changing the city only\n"
+                .. "changes where the weather comes from, never the clock."),
             sub_item_table = self:genDeviceTzMenu(),
         }
     end
@@ -1355,9 +1358,10 @@ function Dashboard:genCityMenu()
 end
 
 --- 时区菜单：按洲分组（北美与南美合成「美洲」，避免两组都只有三四项）。
---- 时区列表的公共骨架：「选择时区」与「设备所在时区」共用同一份 43 项分组数据，
---- 只有「哪一项打勾」和「点了写哪个键」不同，所以把这两件事作为参数传进来。
-function Dashboard:genTzGroupItems(isCurrent, onPick)
+--- 43 项按 `tz_groups` 分组，用「本机时区」一项呈现。
+--- v3.2 起时区只剩这一个入口，「选择时区」已并入本项，所以原来那个
+--- 「打勾/写入各自传参」的骨架没有第二个调用者了，直接展开。
+function Dashboard:genDeviceTzMenu()
     local items = {}
     for _, g in ipairs(CityData.tz_groups) do
         local sub = {}
@@ -1365,8 +1369,8 @@ function Dashboard:genTzGroupItems(isCurrent, onPick)
             if t.group == g.key then
                 sub[#sub + 1] = {
                     text = I18n.tzName(t),
-                    checked_func = function() return isCurrent(t.iana) end,
-                    callback = function() onPick(t.iana) end,
+                    checked_func = function() return self:getDeviceTzIana() == t.iana end,
+                    callback = function() self:setDeviceTz(t.iana) end,
                 }
             end
         end
@@ -1375,18 +1379,6 @@ function Dashboard:genTzGroupItems(isCurrent, onPick)
         end
     end
     return items
-end
-
-function Dashboard:genTzMenu()
-    return self:genTzGroupItems(
-        function(iana) return self:getTzIana() == iana end,
-        function(iana) self:setTz(iana) end)
-end
-
-function Dashboard:genDeviceTzMenu()
-    return self:genTzGroupItems(
-        function(iana) return self:getDeviceTzIana() == iana end,
-        function(iana) self:setDeviceTz(iana) end)
 end
 
 -- ------------------------------------------------------------------ 显示与省电
@@ -1728,19 +1720,31 @@ end
 
 -- ------------------------------------------------------------------ 配置读写
 
---- 这台设备实际所在的时区（IANA）。
+--- 这台设备实际所在的时区（IANA）。**v3.2 起它是看板唯一的时区来源**：
+--- 「选择时区」已并入这一项，看板上所有时间都按它显示。
 ---
 --- 为什么要单列一项而不是直接用系统时区：Kindle 的 `/etc/localtime` 常是断链，
 --- `%z` 恒为 `+0000`，但 RTC 存的是本地钟面时间（详见 dashboard_cities.deviceHasTz）。
---- 那种设备上「os.time() + 城市偏移」会重复加偏移，只能用「城市偏移 − 设备偏移」换算，
+--- 那种设备上 `os.time() + 时区偏移` 会重复加偏移，只能用「目标偏移 − 设备偏移」换算，
 --- 所以必须先知道设备本身在哪个时区。
 ---
---- 取值顺序：用户显式设置 → 系统时区（真能读到时）→ 北京时间。
+--- 取值顺序：用户显式设置 → v3.1 及更早的 `dashboard_tz`（一次性迁移）→
+--- 系统时区（真能读到时）→ 北京时间。
 --- 默认北京时间而不是「问用户」：绝大多数用户在国内，零配置就该是对的；
 --- 海外用户点一次「自动检测我的位置」会把这一项一起改掉。
 function Dashboard:getDeviceTzIana()
     local iana = G_reader_settings:readSetting("dashboard_device_tz")
     if iana and CityData.tzByIana(iana) then return iana end
+    -- v3.1 及更早有两个键：`dashboard_tz` 管时钟、`dashboard_device_tz` 只在
+    -- 无系统时区的设备上写。合并入口后只剩前者没有着落的那批用户（典型是国内
+    -- 设备上手动选过时区的人），所以把旧值接过来，否则升级后时钟会跳回默认。
+    -- 读过一次就写进新键，之后下面的分支不会再走到这里。
+    local legacy = G_reader_settings:readSetting("dashboard_tz")
+    if legacy and CityData.tzByIana(legacy) then
+        G_reader_settings:saveSetting("dashboard_device_tz", legacy)
+        if G_reader_settings.flush then G_reader_settings:flush() end
+        return legacy
+    end
     if CityData.deviceHasTz() then
         local guessed = CityData.guessTimezone()
         if guessed then return guessed.iana end
@@ -1755,6 +1759,11 @@ end
 function Dashboard:setDeviceTz(iana)
     if not CityData.tzByIana(iana) then return end
     G_reader_settings:saveSetting("dashboard_device_tz", iana)
+    -- 顺手清掉旧键：留着会让「用户设过时区」与「设备时区」两个来源并存，
+    -- 降级回 v3.1 时反而可能是旧值生效，容易看成一团乱。
+    if G_reader_settings:readSetting("dashboard_tz") ~= nil then
+        G_reader_settings:delSetting("dashboard_tz")
+    end
     if G_reader_settings.flush then G_reader_settings:flush() end
     self:onConfigChanged()
 end
@@ -1762,7 +1771,7 @@ end
 function Dashboard:getCityName()
     local name = G_reader_settings:readSetting("dashboard_city")
     if name then return name end
-    -- 从未选过城市：取设备时区的代表城市（默认北京时间 → 北京）
+    -- 从未选过城市：取本机时区的代表城市（默认北京时间 → 北京）
     return CityData.defaultCityName(self:getDeviceTzIana())
 end
 
@@ -1774,11 +1783,9 @@ function Dashboard:getCity()
     return CityData.cities[1]
 end
 
+--- 看板显示用的时区。v3.2 起与时区设置合一——城市只决定天气取哪里的数据，
+--- 不再参与时钟计算，所以这里恒等于本机时区。
 function Dashboard:getTzIana()
-    local iana = G_reader_settings:readSetting("dashboard_tz")
-    if iana then return iana end
-    -- 没单独选过时区就跟随设备时区，而不是硬编码东八区：
-    -- 海外用户即便没改过任何设置，时钟也不会差出一个时区。
     return self:getDeviceTzIana()
 end
 
@@ -1791,24 +1798,10 @@ function Dashboard:getTz()
     return { name = t.name, en = t.en, iana = t.iana, offset = off, dst = t.dst }
 end
 
+--- 只改天气的城市。**不再动时区**：城市与时区是两件事，选纽约不代表把时钟
+--- 也搬到纽约（人在北京看纽约天气是正常需求），时钟由「本机时区」单独管。
 function Dashboard:setCity(name)
     G_reader_settings:saveSetting("dashboard_city", name)
-    -- 海外城市自带 tz：选城市时一并改时区，避免「城市对了、时钟错了」这种最常见的
-    -- 配置失误。国内城市没有 tz，用户手动选的北京时间/新疆时间不会被覆盖。
-    for _, c in ipairs(CityData.cities) do
-        if c.name == name then
-            if c.tz and CityData.tzByIana(c.tz) then
-                G_reader_settings:saveSetting("dashboard_tz", c.tz)
-            end
-            break
-        end
-    end
-    if G_reader_settings.flush then G_reader_settings:flush() end
-    self:onConfigChanged()
-end
-
-function Dashboard:setTz(iana)
-    G_reader_settings:saveSetting("dashboard_tz", iana)
     if G_reader_settings.flush then G_reader_settings:flush() end
     self:onConfigChanged()
 end
@@ -1834,11 +1827,14 @@ function Dashboard:autoLocateCity()
     end
 
     self:setCity(city.name)
-    -- ip-api 返回的时区同时记成「设备所在时区」：海外 Kindle 同样没有系统时区，
-    -- 不记这一项的话，城市换到纽约后时钟仍会按北京基准换算，整块偏 13 小时。
-    -- 这台设备在国内时该值与默认的北京时间一致，等于没改。
+    -- 定位同时给出时区：它既说明「天气取哪里」，也说明「这台设备的钟面是哪个时区」，
+    -- 所以两项一起写。直接写键而不走 setDeviceTz()，是为了和上面的 setCity 合并成
+    -- 一次刷新——onConfigChanged 会重建布局并重新拉天气，连做两次是白等一轮。
     if info.iana and CityData.tzByIana(info.iana) then
         G_reader_settings:saveSetting("dashboard_device_tz", info.iana)
+        if G_reader_settings:readSetting("dashboard_tz") ~= nil then
+            G_reader_settings:delSetting("dashboard_tz")
+        end
         if G_reader_settings.flush then G_reader_settings:flush() end
     end
     local tz = self:getTz()
@@ -1942,22 +1938,21 @@ end
 ---
 --- 两种设备要分别算，判据是系统到底有没有配时区：
 ---
----  · **系统时区有效**（普通 Linux / 配好的 Kindle）：`os.time()` 是真实 UTC，
----    直接 `+ 城市偏移` 就得到城市当地时间。
+---  · **系统时区有效**（普通 Linux / 配好的设备）：`os.time()` 是真实 UTC，
+---    加上本机时区偏移就得到当地钟面时间。
 ---
 ---  · **系统时区缺失**（Kindle 常见，`/etc/localtime` 是断链）：`%z` 恒为 +0000，
----    而 RTC 里存的是**本地钟面时间**。此时再 `+ 城市偏移` 等于把本地时间当 UTC
----    又加了一遍，会整块快出一个时区的量（真机上就是快 8 小时）。
----    正确做法是做相对换算：`+ (城市偏移 − 设备偏移)`。
----    设备偏移取「设备所在时区」在**此刻**的实际偏移，夏令时也一并算对。
+---    而 RTC 里存的是**本地钟面时间**。此时再加偏移等于把本地时间当 UTC 又加一遍，
+---    会整块快出一个时区的量（真机上实测快 8 小时）——所以什么都不加。
+---
+--- v3.2 起看板只有一个时区（本机时区），显示时间不再跟着「选择城市」变，
+--- 所以这里不需要再在两个偏移之间做相对换算：要么加自己的偏移，要么原样返回。
 function Dashboard:localNow()
     local now = os.time()
-    local city = self:getTz()
     if CityData.deviceHasTz() then
-        return os.date("!*t", now + city.offset * 60)
+        return os.date("!*t", now + self:getTz().offset * 60)
     end
-    local dev_offset = CityData.offsetAt(self:getDeviceTz(), now)
-    return os.date("!*t", now + (city.offset - dev_offset) * 60)
+    return os.date("!*t", now)
 end
 
 -- ------------------------------------------------------------------ 打开 / 关闭

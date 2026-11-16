@@ -149,7 +149,6 @@ local EN = {
     ["电量 ≤ %d%%"] = "Battery ≤ %d%%",
     ["关闭"] = "Off",
     ["选择城市"] = "City",
-    ["选择时区"] = "Time zone",
     ["直辖市"] = "Municipalities",
     ["省会与首府"] = "Provincial capitals",
     ["港澳台"] = "HK / Macao / Taiwan",
@@ -163,8 +162,9 @@ local EN = {
     -- 时区菜单的分组：北美与南美同属一个「美洲」组，避免两组都是三四项
     ["美洲"] = "Americas",
     ["自动检测我的位置（按 IP）"] = "Detect my location (by IP)",
-    -- 设备自身读不到系统时区时（Kindle 常见）才出现的基准时区
-    ["设备所在时区"] = "Device time zone",
+    -- 设备自身读不到系统时区时（Kindle 常见）才出现的时区项，
+    -- v3.2 起它是看板唯一的时区入口（原「选择时区」已并进来）
+    ["本机时区"] = "Device time zone",
     ["已定位到：%s"] = "Located: %s",
     ["时区：%s"] = "Time zone: %s",
     ["定位失败：%s"] = "Location lookup failed: %s",

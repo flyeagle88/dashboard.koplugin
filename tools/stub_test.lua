@@ -650,6 +650,9 @@ function LuaSettings:readSetting(k, d) return self.data[k] or d end
 function LuaSettings:saveSetting(k, v) self.data[k] = v; return self end
 function LuaSettings:flush() return self end
 function LuaSettings:has(k) return self.data[k] ~= nil end
+-- 真实 LuaSettings 有这个接口，桩件之前漏了。少了它，「先把设置清掉再验证默认值」
+-- 的用例会被内层 pcall 静默吞掉——看起来通过了，其实设置压根没清。
+function LuaSettings:delSetting(k) self.data[k] = nil; return self end
 
 local DataStorage = {}
 function DataStorage:getSettingsDir() return "/tmp/settings" end
@@ -1204,18 +1207,30 @@ end
     end
 
     local place = by_text[T("地点与天气")]
-    if #place.sub_item_table ~= 5 then
-        print(string.format("[FAIL] 「地点与天气」应有 5 项，实际 %d", #place.sub_item_table))
+    -- v3.2 起「选择时区」并入「本机时区」，且本机时区只在设备读不到系统时区时出现
+    local place_CD = package.loaded["dashboard_cities"]
+    local has_device_tz = place_CD.deviceHasTz()
+    local expect_place = 4 + (has_device_tz and 0 or 1)
+    if #place.sub_item_table ~= expect_place then
+        print(string.format("[FAIL] 「地点与天气」应有 %d 项，实际 %d",
+            expect_place, #place.sub_item_table))
         os.exit(1)
     end
     local seen_place = {}
     for _, it in ipairs(place.sub_item_table) do seen_place[it.text] = true end
-    for _, name in ipairs({ "选择城市", "选择时区", "自动检测我的位置（按 IP）",
-                            "天气服务", "立即刷新天气" }) do
+    local want_place = { "选择城市", "自动检测我的位置（按 IP）",
+                         "天气服务", "立即刷新天气" }
+    if not has_device_tz then want_place[#want_place + 1] = "本机时区" end
+    for _, name in ipairs(want_place) do
         if not seen_place[T(name)] then
             print("[FAIL] 「地点与天气」缺少：" .. name)
             os.exit(1)
         end
+    end
+    -- 合并后不许再有第二个时区入口：两个名字都叫「时区」正是用户报的重复
+    if seen_place[T("选择时区")] then
+        print("[FAIL] 「选择时区」应已并入「本机时区」，不该再出现在菜单里")
+        os.exit(1)
     end
 
     -- 城市菜单：v2.60 拆成「国内城市 / 海外城市」两组。原来是 9 个分组 + 自动检测
@@ -1296,17 +1311,20 @@ end)()
     end
     EVENTS[#EVENTS + 1] = string.format("== 海外城市 %d 个，时区全部可查 ==", overseas)
 
-    -- 选海外城市要自动改时区；选国内城市不能覆盖用户手选的时区
+    -- v3.2：城市只决定天气取哪里，**不再碰时钟**。
+    -- 人在北京看纽约天气是正常需求，选城市把时钟也搬过去反而是 bug。
+    instance:setDeviceTz("Asia/Shanghai")
     instance:setCity("伦敦")
-    if instance:getTzIana() ~= "Europe/London" then
-        print("[FAIL] 选伦敦后时区没跟着变成 Europe/London，实际 " .. tostring(instance:getTzIana()))
+    if instance:getCityName() ~= "伦敦" then
+        print("[FAIL] 选城市没生效，实际 " .. tostring(instance:getCityName()))
+        os.exit(1)
+    end
+    if instance:getTzIana() ~= "Asia/Shanghai" then
+        print("[FAIL] 选城市不该改动时区（城市只管天气），实际 "
+            .. tostring(instance:getTzIana()))
         os.exit(1)
     end
     instance:setCity("北京")
-    if instance:getTzIana() ~= "Europe/London" then
-        print("[FAIL] 选国内城市不应覆盖已选时区")
-        os.exit(1)
-    end
 
     -- 定位失败：已有设置不能被动过
     local before_city, before_tz = instance:getCityName(), instance:getTzIana()
@@ -1345,7 +1363,7 @@ end)()
     EVENTS[#EVENTS + 1] = "== 自动定位：成功选中纽约 + America/New_York，失败不动设置 =="
 
     -- 恢复默认，后面的中英文断言与出图用例都假定是北京
-    instance:setTz("Asia/Shanghai")
+    instance:setDeviceTz("Asia/Shanghai")
     instance:setCity("北京")
 end)()
 
@@ -1410,23 +1428,71 @@ end)()
         os.exit(1)
     end
 
-    -- 4) 城市换成纽约：相对北京慢 13 小时
-    instance:setTz("America/New_York")
-    local expect_ny = real_date("!*t", now + (-300 - 480) * 60)
+    -- 4) v3.2：时区只剩一个（本机时区），且它描述的就是"设备在哪"。
+    --    无系统时区的设备上 RTC 已是钟面时间，所以改这个设置**不该**让时钟移位，
+    --    否则就是同一台设备被算了两遍偏移。时区设置本身仍要能读到，
+    --    天气的 tz 参数、农历与节气日期都靠它。
+    instance:setDeviceTz("America/New_York")
     got = instance:localNow()
-    if got.hour ~= expect_ny.hour then
+    if got.hour ~= expect_local.hour or got.min ~= expect_local.min then
         print(string.format(
-            "[FAIL] 无时区设备选纽约应比钟面时间慢 13 小时：实际 %02d 点，应为 %02d 点",
-            got.hour, expect_ny.hour))
+            "[FAIL] 无时区设备的时钟应恒等于钟面时间：实际 %02d:%02d，应为 %02d:%02d",
+            got.hour, got.min, expect_local.hour, expect_local.min))
+        os.exit(1)
+    end
+    local ny_off = CD.offsetAt(CD.tzByIana("America/New_York"), now)
+    if instance:getTz().offset ~= ny_off then
+        print(string.format("[FAIL] 本机时区没生效：getTz().offset = %d，应为 %d",
+            instance:getTz().offset, ny_off))
         os.exit(1)
     end
 
     -- 5) 收尾：恢复真实 os.date 与默认城市，后面的用例都假定北京
     restore_date()
-    instance:setTz("Asia/Shanghai")
+    instance:setDeviceTz("Asia/Shanghai")
     instance:setCity("北京")
     pcall(function() G_reader_settings:delSetting("dashboard_device_tz") end)
-    EVENTS[#EVENTS + 1] = "== 时钟基准：无时区设备走相对换算，默认回落北京/东八区 =="
+    EVENTS[#EVENTS + 1] = "== 时钟基准：无时区设备直接取钟面时间，默认回落北京/东八区 =="
+end)()
+
+-- ============ 升级迁移：v3.1 的 dashboard_tz 要接成本机时区 ============
+-- v3.1 及更早有两个键：`dashboard_tz` 是时钟显示用的、`dashboard_device_tz` 只在
+-- 无系统时区的设备上写。v3.2 合并成一个入口，如果直接把旧键丢掉，那些只在
+-- 「选择时区」里设过一次的老用户会失效——时钟跳回默认，等于升级即坏。
+;(function()
+    local real_date = os.date
+    local function mock_no_tz()
+        os.date = function(fmt, t)
+            if fmt == "%z" then return "+0000" end
+            if fmt == "%Z" then return "UTC" end
+            return real_date(fmt, t)
+        end
+    end
+
+    mock_no_tz()
+    pcall(function() G_reader_settings:delSetting("dashboard_device_tz") end)
+    G_reader_settings:saveSetting("dashboard_tz", "Europe/London")
+
+    if instance:getTzIana() ~= "Europe/London" then
+        print("[FAIL] 旧键 dashboard_tz 没迁移到本机时区，实际 "
+            .. tostring(instance:getTzIana()))
+        os.exit(1)
+    end
+    if G_reader_settings:readSetting("dashboard_device_tz") ~= "Europe/London" then
+        print("[FAIL] 迁移后没写回 dashboard_device_tz，下次启动会再迁移一遍")
+        os.exit(1)
+    end
+
+    -- 迁移之后再改设置，旧键必须清掉：两个来源并存会让「改了没生效」难以排查
+    instance:setDeviceTz("Asia/Shanghai")
+    if G_reader_settings:readSetting("dashboard_tz") ~= nil then
+        print("[FAIL] 改本机时区后旧键 dashboard_tz 应被清除")
+        os.exit(1)
+    end
+
+    os.date = real_date
+    instance:setCity("北京")
+    EVENTS[#EVENTS + 1] = "== 升级迁移：v3.1 的 dashboard_tz 接成本机时区，旧键随后清除 =="
 end)()
 
 -- 凭据来源与脱敏显示

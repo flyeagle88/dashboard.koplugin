@@ -218,14 +218,16 @@ The list holds 34 cities in China (municipalities, provincial capitals, Hong Kon
 China then has three groups, and overseas splits into Asia, Europe, North America, South America, Oceania
 and Africa. The interface itself is bilingual.
 
-- **Picking an overseas city also sets its time zone.** Choose "New York" and the zone becomes `America/New_York` in the same tap. Cities in China leave the zone alone — mainland China has both Beijing time and Xinjiang time, so choosing a city never overrides a zone you picked yourself.
+- **The city only changes the weather, never the clock.** Picking "New York" moves where the weather comes from; the clock keeps following the time zone you are in. Watching New York weather from Beijing is normal, and dragging the clock along with it would be the bug.
 - **Don't want to hunt through the list**: menu → "Location & weather" → "Detect my location (by IP)". It looks up the approximate location of your network once and picks the nearest city. If it fails it shows why and leaves your settings untouched.
 - **Daylight saving is handled.** London, Paris, New York, Los Angeles, Sydney, Auckland and others shift by an hour under their local rules; Mexico and Brazil have abolished DST and use a fixed offset; Egypt and Morocco have irregular rules and are also fixed.
 - **Overseas cities use Open-Meteo for weather.** QWeather's air-quality endpoint only covers stations in China, so overseas coordinates get no AQI; those cities go straight to Open-Meteo (no key required) and the footer still names the source.
 - The header shows a plain offset such as `UTC+8` / `UTC-5`, and during DST it shows the offset actually in effect.
-- **"Device time zone"**: most Kindles never set a system time zone (`/etc/localtime` points at a file that does not exist), so the board can only treat the device clock reading as local time and uses this entry as the reference for converting to other cities. It defaults to Beijing time and only appears under "Place & weather" when the device reports no system time zone. Getting it wrong shifts every time on the board. "Detect my location" sets it for you.
+- **"Device time zone" is the board's only time-zone setting**: the clock, lunar date, moon phase and sunrise/sunset are all shown in it. Most Kindles never set a system time zone (`/etc/localtime` points at a file that does not exist), so this entry only appears under "Location & weather" when the device reports no system time zone. It defaults to Beijing time; getting it wrong shifts every time on the board. "Detect my location" sets it for you.
 
 On first run, before you have picked a city, the board follows the device time zone if the device reports one (a UTC+9 device gets Tokyo) and otherwise uses Beijing with UTC+8, so there is nothing to configure before it works.
+
+When upgrading from v3.1 or earlier, a time zone you had picked under the old "Time zone" entry is carried over to "Device time zone" automatically — there is nothing to set up again.
 
 ---
 
