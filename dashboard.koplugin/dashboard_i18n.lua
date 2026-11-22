@@ -176,6 +176,7 @@ local EN = {
     ["返回内容缺少坐标"] = "Response has no coordinates",
     ["服务拒绝了这次查询"] = "The lookup service refused this query",
     ["竖屏"] = "Portrait",
+    ["竖屏（旋转 180°）"] = "Portrait (upside down)",
     ["横屏（向右转 90°）"] = "Landscape (rotate right)",
     ["横屏（向左转 90°）"] = "Landscape (rotate left)",
     ["（当前）"] = " (current)",
@@ -263,6 +264,8 @@ local EN = {
     ["待办"] = "To-do",
     -- v2.53：B 区新默认组件。英文不能直译成 "Today action"，
     -- 那在英语里不成词；用 "Today"（本意就是「今天这一屏要做的事」）。
+    ["桌面时钟照片"] = "Desk Clock photo",
+    ["找不到桌面时钟照片"] = "Desk Clock photo not found",
     ["今日行动"] = "Today",
     ["另有"] = "plus",
     ["页脚手势提示"] = "Footer gesture hints",

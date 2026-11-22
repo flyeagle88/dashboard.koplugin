@@ -309,6 +309,18 @@ local ROT_LANDSCAPE_CCW = 3
 --- 屏幕是竖是横只由旋转值的**奇偶**决定（奇数 = 宽高互换），所以「竖屏」取偶数档、
 --- 「横屏」取奇数档，不能写死 0/1/3——万一 KOReader 本来就是横着启动的，
 --- 写死 0 得到的还是同一个方向，转了等于没转（桩件里就踩到了这个）。
+local ORIENTATIONS = { "portrait", "landscape", "portrait_reverse", "landscape_ccw" }
+
+local function orientation_index(mode)
+    for index, orientation in ipairs(ORIENTATIONS) do
+        if orientation == mode then return index end
+    end
+end
+
+local function is_landscape(mode)
+    return mode == "landscape" or mode == "landscape_ccw"
+end
+
 local function target_rotation(base, mode)
     base = base or 0
     if mode == "landscape" then
@@ -316,7 +328,8 @@ local function target_rotation(base, mode)
     elseif mode == "landscape_ccw" then
         return (base % 2 == 1) and (base + 2) % 4 or (base + 3) % 4
     end
-    return (base % 2 == 0) and base or (base + 3) % 4
+    local portrait = (base % 2 == 0) and base or (base + 3) % 4
+    return (mode == "portrait_reverse") and (portrait + 2) % 4 or portrait
 end
 
 -- 四边留白：15 个设计单位（600px 短边机型上正好 15px，PW3 上约 27px）。
@@ -1051,19 +1064,20 @@ end
 
 -- ------------------------------------------------------------------ 菜单
 function Dashboard:addToMainMenu(menu_items)
+    local orders = {
+        require("ui/elements/reader_menu_order"),
+        (require("ui/elements/filemanager_menu_order")),
+    }
     local first = { "dashboard_desk", "deskclock", "deskclock_landscape" }
-    for _, module in ipairs({ "ui/elements/reader_menu_order", "ui/elements/filemanager_menu_order" }) do
-        local ok, order = pcall(require, module)
-        if ok and type(order.tools) == "table" then
-            for index = #first, 1, -1 do
-                local id = first[index]
-                for position = #order.tools, 1, -1 do
-                    if order.tools[position] == id then
-                        table.remove(order.tools, position)
-                    end
+    for _, order in ipairs(orders) do
+        for index = #first, 1, -1 do
+            local id = first[index]
+            for position = #order.tools, 1, -1 do
+                if order.tools[position] == id then
+                    table.remove(order.tools, position)
                 end
-                table.insert(order.tools, 1, id)
             end
+            table.insert(order.tools, 1, id)
         end
     end
     menu_items.dashboard_desk = {
@@ -1075,7 +1089,7 @@ end
 
 
 function Dashboard:genMenuItemTable()
-    -- 顶层只放 6 条（Settings 入口 7 条，含「打开看板」）。
+    -- KOReader 菜单入口多两项：打开看板、保持唤醒。
     --
     -- 这里有一条硬约束：TouchMenu 每页容量 = min(按行高算出来的条数,
     -- max_per_page_default)。真机实读（PW3 1072x1448）：竖屏算出 13，被默认值
@@ -1093,6 +1107,14 @@ function Dashboard:genMenuItemTable()
             -- 已经打开时这个入口没有意义，看板内弹出的菜单会把它过滤掉
             hide_in_dashboard = true,
             callback = function() self:open() end,
+        },
+        {
+            text = TL("打开看板（保持唤醒）", "Open dashboard (keep awake)"),
+            hide_in_dashboard = true,
+            help_text = TL(
+                "向上滑退出看板，再按电源键休眠。保持唤醒会增加耗电。",
+                "Swipe up to exit the dashboard before pressing Power to sleep. Keeping awake uses more battery."),
+            callback = function() self:open(true) end,
         },
         {
             text = T("外观"),
@@ -1136,52 +1158,35 @@ function Dashboard:genMenuItemTable()
             callback = function()
                 UIManager:show(InfoMessage:new{
                     text = TL(
-                        "手势：点按刷新天气 · 上划退出看板\n"
-                        .. "屏幕上缘下滑 → 打开看板菜单（外观 / 地点与天气 / 内容 / 显示与省电）\n"
-                        .. "看板没打开时：工具 → 桌面看板（同一套菜单）\n"
-                        .. "城市可选国内与海外（亚洲/欧洲/美洲/大洋洲/非洲）；\n"
-                        .. "选海外城市会自动把时区一并改掉，\n"
-                        .. "也可点「地点与天气 → 自动检测我的位置（按 IP）」让它自己挑最近的城市。\n"
-                        .. "左右滑动 → 竖屏 ↔ 横屏 互相切换（会真的旋转屏幕）\n\n"
-                        .. "点「倒数日」「待办」这两块卡片 → 弹出列表（可切换置顶、勾选完成）；\n"
-                        .. "增删改在菜单「内容 → 倒数日 / 待办事项」里，录入分两步：\n"
-                        .. "第 1 步填名称（键盘），第 2 步点选日期（年 / 月 / 日 各自翻页，免键盘）。\n"
-                        .. "  倒数日：名称 + 日期，例「妈妈生日」+ 2026-11-30\n"
-                        .. "  待办：名称 + 日期，日期默认今天\n"
-                        .. "数据存在 KOReader 设置目录的 dashboard_agenda.lua，可直接备份。\n\n"
-                        .. "Kindle 没有重力感应，机器横过来屏幕不会自己转，\n"
-                        .. "所以横屏要靠左右滑动（或菜单「外观」）手动切，切完请把设备横着拿。\n"
-                        .. "菜单「外观」里选中一项后会立即关菜单并按新方向重排，不用手动关菜单。\n"
-                        .. "若横屏后文字是倒的，到菜单「外观」里换「向左转 90°」那一项。\n\n"
-                        .. "右上角显示电量百分比与电量图标（充电时图标反白）。\n"
-                        .. "天气优先用和风天气，不可用时自动降级到 Open-Meteo，页脚会标注来源。\n"
-                        .. "空闲超时或按电源键休眠时，屏幕会停留在看板上（相当于屏保）。\n"
-                        .. "长时间显示建议接通电源；清残影默认 180 分钟一次，且默认不再整屏反白，\n"
-                        .. "可在「显示与省电 → 省电设置」里调。\n"
-                        .. "想再减轻刷新时的黑闪感，可在「外观 → 界面配色」换成「报纸黑白风」。\n\n"
+                        "工具 → 桌面看板\n"
+                        .. "「打开看板」沿用自动休眠设置。「打开看板（保持唤醒）」会阻止自动休眠；"
+                        .. "要休眠，先上滑退出，再按电源键。\n\n"
+                        .. "左右滑都按同一顺序转屏：竖屏 → 右横屏 → 反向竖屏 → 左横屏。"
+                        .. "也可在「外观」直接选方向。顶部下滑打开菜单，上滑退出。"
+                        .. "点时间可手动更新天气。\n\n"
+                        .. "B 区可选「个人家庭照片」。有多张照片时，点照片换图，约每 5 分钟自动轮播，"
+                        .. "换图只刷新照片卡片。照片放在 KOReader 的 plugins/dashboard.koplugin/photos/。\n\n"
+                        .. "启用看板屏保后，休眠时会保留看板画面。短按电源键唤醒后才能继续操作。"
+                        .. "页脚提示和刷新节奏可在「显示与省电」里调整。\n\n"
+                        .. "「地点与天气」可选城市或按 IP 自动定位。和风天气不可用时会使用 Open-Meteo。"
+                        .. "关闭页脚操作提示后，页脚可显示天气更新时间和来源。\n\n"
+                        .. "点倒数日或待办卡片可打开列表。增删改在「内容」菜单，先填名称再选日期。"
+                        .. "如需备份，可复制 KOReader 设置目录里的 dashboard_agenda.lua。\n\n"
                         .. "看板版本 v" .. DASHBOARD_VERSION,
-                        "Gestures: tap to refresh · swipe up to exit\n"
-                        .. "Swipe down from the top edge: dashboard menu (appearance / location & weather /\n"
-                        .. "content / display & power)\n"
-                        .. "When closed: Tools → Desk dashboard\n"
-                        .. "Cities cover China plus Asia, Europe, the Americas, Oceania and Africa;\n"
-                        .. "picking an overseas one also sets its time zone.\n"
-                        .. "Or use Location & weather → Detect my location (by IP) to pick the nearest city.\n"
-                        .. "Swipe sideways: switch portrait ↔ landscape (really rotates the screen)\n\n"
-                        .. "Kindles have no accelerometer, so landscape must be triggered manually\n"
-                        .. "by swiping sideways or via the Appearance menu; then hold the device sideways.\n"
-                        .. "If the landscape text appears upside down, pick the other rotation.\n\n"
-                        .. "Tap the Countdown / To-do card to open its list (pin, tick off);\n"
-                        .. "add and remove them under Content → Countdown / To-dos, in two steps:\n"
-                        .. "step 1 types the name, step 2 picks the date (no typing for dates).\n"
-                        .. "Data lives in dashboard_agenda.lua in the KOReader settings folder.\n\n"
-                        .. "Top right: battery percentage and icon (inverted while charging).\n"
-                        .. "Weather comes from QWeather; if unavailable it falls back to Open-Meteo,\n"
-                        .. "and the footer shows the current source.\n"
-                        .. "On idle or power-button sleep the screen keeps the dashboard (acts as a\n"
-                        .. "screensaver). For long display, keep it plugged in; full refresh\n"
-                        .. "defaults to every 180 minutes (Display & power → Power saving).\n"
-                        .. "For the calmest refresh, set Appearance → UI theme to Newsprint.\n\n"
+                        "Tools → Desk dashboard\n"
+                        .. "Open dashboard uses the usual sleep settings. Open dashboard (keep awake) prevents auto-sleep. "
+                        .. "To sleep, swipe up to exit, then press Power.\n\n"
+                        .. "Swipe left or right to cycle in the same order: portrait, landscape right, reverse portrait, landscape left. "
+                        .. "You can also choose an orientation under Appearance. Swipe down from the top for the menu or up to exit. "
+                        .. "Tap the clock to update weather.\n\n"
+                        .. "Choose Family photos for zone B. With multiple photos, tap the card to switch or wait about five minutes. "
+                        .. "Photo changes refresh the card only. Store photos in KOReader's plugins/dashboard.koplugin/photos/.\n\n"
+                        .. "With the dashboard screensaver enabled, the dashboard stays visible during sleep. Press Power to wake. "
+                        .. "Footer hints and refresh settings are under Display & power.\n\n"
+                        .. "Choose a city or detect it by IP under Location & weather. Open-Meteo is used when QWeather is unavailable. "
+                        .. "The footer can show the weather update time and source when hints are disabled.\n\n"
+                        .. "Tap a Countdown or To-do card to open its list. Edit entries under Content by entering a name and choosing a date. "
+                        .. "To back up your entries, copy dashboard_agenda.lua from the KOReader settings folder.\n\n"
                         .. "Dashboard version v" .. DASHBOARD_VERSION),
                 })
             end,
@@ -1219,11 +1224,10 @@ function Dashboard:genAppearanceMenu()
     end
     local sub = {
         orientEntry(T("竖屏"), "portrait"),
+        orientEntry(T("竖屏（旋转 180°）"), "portrait_reverse"),
         orientEntry(T("横屏（向右转 90°）"), "landscape"),
         orientEntry(T("横屏（向左转 90°）"), "landscape_ccw"),
     }
-    -- 分隔线画在「版式三项」之后（TouchMenu 的 separator 是画在**本项下面**的，
-    -- 所以要挂在第三项上，挂到第四项就会落到「竖屏布局」和「横屏布局」中间）。
     sub[#sub].separator = true
     -- v2.78：界面配色。两套墨阶，切换后立刻整屏重绘一次。
     -- 放在版式三项之后、布局之前 ——「这块板子长什么样」先于「每块放什么」。
@@ -1996,7 +2000,7 @@ function Dashboard:brushTopStrip(delay, opts)
     end)
 end
 
-function Dashboard:open()
+function Dashboard:open(keep_awake)
     if self.shown then return end
     -- 休眠屏保时画的那棵树可能还在屏幕上（比如唤醒事件没走 close 分支、或者
     -- 用户从菜单里直接打开看板）。先撤掉，否则同一块屏幕上会叠两棵看板树。
@@ -2006,10 +2010,7 @@ function Dashboard:open()
     self._open_ts = os.time()
     -- 记下打开前的屏幕方向，关闭时原样恢复，别把整个 KOReader 留在横屏
     self.base_rotation = screen_rotation()
-    -- 恢复电源键 + 允许休眠：老版本这里设 preventScreenSaver=1 并 preventStandby，
-    -- 结果是按电源键完全没反应。休眠画面由 installScreenSaverHook 接管成看板，
-    -- 所以这里不再需要抑制系统屏保。
-    self:releaseKindleScreenSaverLock()
+    self:configureDashboardSleep(keep_awake == true)
     -- 菜单/挂起重排的状态一并清干净，避免上一轮留下的标记把新会话卡住
     self.menu = nil
     self.menu_open = false
@@ -2024,7 +2025,7 @@ function Dashboard:open()
     -- 沿用上次选定的方向：选了横屏，重启 KOReader 打开看板时仍然是横屏；
     -- 选的是竖屏而设备当前是横的（上次没还原干净），这里也一并转回去
     local mode = G_reader_settings:readSetting("dashboard_orientation")
-    if mode ~= "portrait" and mode ~= "landscape" and mode ~= "landscape_ccw" then
+    if not orientation_index(mode) then
         mode = nil
     end
     -- 菜单里的「（当前）」标记要用它；没有存过配置就按屏幕实际方向
@@ -2045,7 +2046,7 @@ function Dashboard:open()
             self.rotation_changed = (screen_rotation() ~= self.base_rotation)
         else
             -- 转不了就按要的方向排（画面方向不变，至少排版是另一套）
-            self.force_landscape = (want_rotate ~= "portrait")
+            self.force_landscape = is_landscape(want_rotate)
         end
         -- v2.64：原来是固定等 1.2 秒再建版式，理由是「转屏后宽高要等一拍才互换」。
         -- 实测是同步互换的，那 1.2 秒纯粹是让用户多盯着歪掉的文件管理器看一秒。
@@ -2119,6 +2120,7 @@ function Dashboard:close()
     -- no_paint：马上要把屏幕交给阅读页，这里不用补刷一次。
     self:endRotateMute{ no_paint = true }
     self.shown = false
+    self:restoreDashboardSleep()
     -- 万一是菜单开着的时候被关掉，别让标记卡住导致以后再也不重排；
     -- 菜单控件本身也要撤，否则屏幕上会留一个没人管的孤儿菜单。
     local menu = self.menu
@@ -2141,7 +2143,6 @@ function Dashboard:close()
     if root then
         UIManager:close(root)
     end
-    self:restoreKindleScreenSaverLock()
     -- 把屏幕转回打开看板前的方向，否则退出看板后整个 KOReader 都是横的。
     -- v2.68：这里必须走和 rotateScreen 一样的入口，理由见 restoreRotation 的注释。
     if self.rotation_changed and self.base_rotation ~= nil then
@@ -2163,32 +2164,38 @@ function Dashboard:close()
     end
 end
 
---- Kindle 屏保总开关：进入看板时放开它。
---- 老版本这里设 preventScreenSaver=1，想的是「别让屏保盖掉看板」，
---- 但 powerd 这个属性的副作用远比预想大：设成 1 之后**电源键会被完全忽略**，
---- 而且不产生可捕获的事件（MobileRead 上做 Kindle 屏保工具的开发者实测原话：
---- "If we set preventScreenSaver to 1, the power button seems to be ignored totally"）。
---- 表现就是按电源键毫无反应、设备也不会自动休眠。
---- 现在改为显式写 0：电源键恢复、设备可以正常休眠（这正是我们要的：
---- 休眠那一刻的画面由下面的屏保钩子接管成看板，比一直亮着省电得多）。
-function Dashboard:releaseKindleScreenSaverLock()
-    if not Device:isKindle() then return end
-    -- 记下进入前的值，退出看板时还原（多数机器是 0）
-    if self.saved_prevent_ss == nil then
-        self.saved_prevent_ss = readLipcInt("com.lab126.powerd", "preventScreenSaver")
+--- 仅在主动打开看板期间改变休眠设置，退出时恢复进入前的值。
+function Dashboard:configureDashboardSleep(keep_awake)
+    if keep_awake then
+        local share = require("pluginshare")
+        self.sleep_state = {
+            share = share,
+            pause_auto_suspend = share.pause_auto_suspend,
+            keepalive = share.keepalive,
+        }
+        share.pause_auto_suspend = true
+        share.keepalive = true
     end
-    os.execute("lipc-set-prop -i com.lab126.powerd preventScreenSaver 0")
-    logger.dbg("dashboard: preventScreenSaver = 0（放开电源键与自动休眠）")
+
+    if not Device:isKindle() then return end
+    self.saved_prevent_ss = readLipcInt("com.lab126.powerd", "preventScreenSaver")
+    if keep_awake and self.saved_prevent_ss == nil then return end
+    os.execute(string.format("lipc-set-prop -i com.lab126.powerd preventScreenSaver %d",
+        keep_awake and 1 or 0))
 end
 
---- 退出看板时把 preventScreenSaver 写回进入前的值。
-function Dashboard:restoreKindleScreenSaverLock()
-    if not Device:isKindle() then return end
+function Dashboard:restoreDashboardSleep()
+    local state = self.sleep_state
+    self.sleep_state = nil
+    if state then
+        state.share.pause_auto_suspend = state.pause_auto_suspend
+        state.share.keepalive = state.keepalive
+    end
     local value = self.saved_prevent_ss
-    if value == nil then return end
     self.saved_prevent_ss = nil
-    os.execute(string.format("lipc-set-prop -i com.lab126.powerd preventScreenSaver %d", value))
-    logger.dbg("dashboard: preventScreenSaver 还原为", value)
+    if value ~= nil then
+        os.execute(string.format("lipc-set-prop -i com.lab126.powerd preventScreenSaver %d", value))
+    end
 end
 
 -- ---------------------------------------------------------------- 休眠屏保
@@ -2253,7 +2260,7 @@ function Dashboard:renderSaverFrame()
     local mode = G_reader_settings:readSetting("dashboard_orientation")
     local landscape
     local base = screen_rotation()
-    if base ~= nil and (mode == "portrait" or mode == "landscape" or mode == "landscape_ccw") then
+    if base ~= nil and orientation_index(mode) then
         local target = target_rotation(base, mode)
         if target ~= base then
             self.saver_base_rotation = base
@@ -2262,7 +2269,7 @@ function Dashboard:renderSaverFrame()
                 error("dashboard: 屏保方向切换失败")
             end
         end
-        landscape = mode ~= "portrait"
+        landscape = is_landscape(mode)
     end
     local ok, root = pcall(self.createRoot, self, landscape)
     if not ok or not root then
@@ -2491,9 +2498,11 @@ function Dashboard:tick()
 
     -- 跨日：日期/农历/节气/月历全部要重算
     local day_key = string.format("%04d%02d%02d", now.year, now.month, now.day)
-    if self._deskclock_photo_slot ~= nil and self._deskclock_photo_slot ~= dashboardPhotoSlot(self) then
-        self:refreshLayout("wipe")
-    elseif day_key ~= self.day_key then
+    if day_key == self.day_key and self._deskclock_photo_slot ~= nil
+        and self._deskclock_photo_slot ~= dashboardPhotoSlot(self) then
+        self:refreshPhotoCard(dashboardPhotoSlot(self))
+    end
+    if day_key ~= self.day_key then
         -- v2.72：跨日整版换（日期/农历/节气/月历全变），走整屏柔化刷而不是整屏反白
         self:refreshLayout("wipe")
     elseif not low and pc.full_refresh > 0 then
@@ -3555,7 +3564,7 @@ end
 --- 于是永远排成竖屏。委托给 ui:onSetRotationMode 之后画面才真的转过来。
 --- 顺序不能反：先自己 set 再调它，它判定「方向没变」就跳过重排（踩过）。
 function Dashboard:rotateScreen(mode)
-    if mode ~= "portrait" and mode ~= "landscape" and mode ~= "landscape_ccw" then
+    if not orientation_index(mode) then
         return false
     end
     if not (Screen.setRotationMode and Screen.getRotationMode) then return false end
@@ -3630,8 +3639,9 @@ function Dashboard:getOrientation()
     local now = screen_rotation()
     if now == nil then return "portrait" end
     local base = self.base_rotation or 0
-    if now == target_rotation(base, "landscape") then return "landscape" end
-    if now == target_rotation(base, "landscape_ccw") then return "landscape_ccw" end
+    for _, mode in ipairs(ORIENTATIONS) do
+        if now == target_rotation(base, mode) then return mode end
+    end
     return "portrait"
 end
 
@@ -3644,18 +3654,18 @@ function Dashboard:currentOrientationMode()
         return self:getOrientation()
     end
     local saved = G_reader_settings:readSetting("dashboard_orientation")
-    if saved == "portrait" or saved == "landscape" or saved == "landscape_ccw" then
+    if orientation_index(saved) then
         return saved
     end
     return self:getOrientation()
 end
 
---- 切换方向（portrait / landscape / landscape_ccw）并重建版面。
+--- 切换屏幕方向并重建版面。
 --- 优先真旋转屏幕——只有这样才能让「设备横过来」时画面是正的；万一这台设备
 --- 转不了（Screen 没有 setRotationMode，或调了不生效），退化成「只换版式」：
 --- 画面方向不变，仅换成另一套排版，至少内容不再是当前那一套。
 function Dashboard:setOrientation(mode)
-    if mode ~= "landscape" and mode ~= "landscape_ccw" then mode = "portrait" end
+    if not orientation_index(mode) then mode = "portrait" end
     -- 记下「用户想要的」方向，菜单里打标记用它（见 currentOrientationMode）
     self.orientation_mode = mode
     -- 看板没打开时不要动屏幕：那会把整个 KOReader 界面转过去，而看板没开就没有
@@ -3688,7 +3698,7 @@ function Dashboard:setOrientation(mode)
         -- 与打开时的方向不一样才算「改过」，close 时才需要还原
         self.rotation_changed = (screen_rotation() ~= self.base_rotation)
     else
-        self.force_landscape = (mode ~= "portrait")
+        self.force_landscape = is_landscape(mode)
         logger.warn("dashboard: 屏幕旋转不可用，退化为仅切换版式")
     end
     G_reader_settings:saveSetting("dashboard_orientation", mode)
@@ -3700,21 +3710,12 @@ function Dashboard:setOrientation(mode)
     return rotated
 end
 
---- 左右滑动：在「竖屏 ↔ 横屏」之间来回切。
---- 以前这里只是把版面重建一次，而 Kindle 没有重力感应、Screen 尺寸永远不变，
---- 所以不管机器怎么摆、滑多少次，出来都是竖屏那一套（提示也恒为「竖屏」）。
---- 现在改成真的转屏幕：转完尺寸互换，横屏版式才有 1448x1072 的可用空间。
+--- 左滑或右滑都切换到下一个屏幕方向。
 function Dashboard:relayoutFromGesture()
     if not self.shown then return end
-    -- 以「当前实际排版」为准取反，不能看屏幕尺寸：转屏失败退化成纯版式切换时，
-    -- 屏幕尺寸不会变，按尺寸判断会一直往同一个方向切。
-    local to_landscape
-    if self.layout_landscape ~= nil then
-        to_landscape = not self.layout_landscape
-    else
-        to_landscape = not self:screenIsLandscape()
-    end
-    local rotated = self:setOrientation(to_landscape and "landscape" or "portrait")
+    local index = orientation_index(self:currentOrientationMode()) or 1
+    local mode = ORIENTATIONS[index % #ORIENTATIONS + 1]
+    local rotated = self:setOrientation(mode)
     -- v2.66：转成了就不再弹提示。滑一下，屏幕本身就是回执——画面方向变了、版式
     -- 换了一套，再补一句「已转为横屏」属于废话；而且 InfoMessage 是盖满全屏的控件，
     -- 它自己要刷一次，刚在前一版省下来的「多刷一下」正好从这儿又回来了。
@@ -3722,7 +3723,7 @@ function Dashboard:relayoutFromGesture()
     -- 到底是没反应还是生效了。
     if not rotated then
         UIManager:show(InfoMessage:new{
-            text = to_landscape and T("已切换为横屏版式（本机不支持转屏）")
+            text = is_landscape(mode) and T("已切换为横屏版式（本机不支持转屏）")
                 or T("已切换为竖屏版式（本机不支持转屏）"),
             timeout = 2,
         })
@@ -4547,6 +4548,7 @@ end
 
 function Dashboard:createRoot(saver_landscape)
     self._deskclock_photo_slot = nil
+    self.photo_view = nil
     local W, H = Screen:getWidth(), Screen:getHeight()
     -- 版式方向：默认按屏幕像素尺寸判断；左右滑动切换过之后由 force_landscape 指定。
     -- Kindle 没有重力感应，设备横过来时屏幕像素方向也不变（仍是 1072x1448），
@@ -4697,7 +4699,7 @@ function Dashboard:createRoot(saver_landscape)
                         if slot == nil then return end
                         self.photo_manual_slot = (slot + 1) % self.photo_count
                         self.photo_switched_at = os.time()
-                        self:refreshLayout("wipe")
+                        self:refreshPhotoCard(self.photo_manual_slot)
                     else
                         self:openZoneList(key)
                     end
@@ -4754,8 +4756,6 @@ function Dashboard:createRoot(saver_landscape)
                 if not self.shown then return false end
                 local dir = ges and ges.direction
                 if dir == "east" or dir == "west" then
-                    -- 左右滑动 = 重新布局：设备转过向（或改了 KOReader 方向设置）之后
-                    -- 用这个手势让看板按新尺寸重排，不必再进菜单
                     UIManager:nextTick(function() self:relayoutFromGesture() end)
                     return true
                 end
@@ -5107,11 +5107,53 @@ function Dashboard:iconBitmap(name, px, opts)
     return nil
 end
 
+function Dashboard:makeDashboardPhoto(path, w, h)
+    local RenderImage = require("ui/renderimage")
+    local loaded, source = pcall(RenderImage.renderImageFile, RenderImage, path)
+    if not loaded or not source then return nil end
+    local image_w, image_h = source:getWidth(), source:getHeight()
+    local target_w, target_h = math.max(1, math.floor(w)), math.max(1, math.floor(h))
+    local crop_w = math.max(1, math.min(image_w, math.floor(image_h * target_w / target_h)))
+    local crop_h = math.max(1, math.min(image_h, math.floor(image_w * target_h / target_w)))
+    local crop_x = math.floor((image_w - crop_w) / 2)
+    local crop_y = math.floor((image_h - crop_h) / 2)
+    local bitmap = source:viewport(crop_x, crop_y, crop_w, crop_h):scale(target_w, target_h)
+    source:free()
+    return ImageWidget:new{ image = bitmap, width = target_w, height = target_h }
+end
+
+function Dashboard:refreshPhotoCard(slot)
+    if self.menu_open or not self.root then return end
+    local hit = self.zone_hits and self.zone_hits.B
+    local view = self.photo_view
+    if not (hit and hit.photo_card and hit.x and hit.y and view and self.photo_paths) then return end
+    local path = self.photo_paths[slot + 1]
+    if not path then return end
+    local next_photo = self:makeDashboardPhoto(path, view.dimen.w, view.dimen.h)
+    if not next_photo then return end
+
+    local previous = view[1]
+    view[1] = next_photo
+    self._deskclock_photo_slot = slot
+    if previous and previous.free then previous:free() end
+
+    local region = Geom:new{ x = hit.x, y = hit.y, w = hit.w, h = hit.h }
+    if self:softRepaintEnabled() and Screen.bb then
+        local painted = pcall(function()
+            if Screen.beforePaint then Screen:beforePaint() end
+            hit.photo_card:paintTo(Screen.bb, region.x, region.y)
+            if Screen.afterPaint then Screen:afterPaint() end
+        end)
+        if painted and self:_flushRegion(region.x, region.y, region.w, region.h, true) then return end
+    end
+    UIManager:setDirty(self.root, "[partial]", region)
+end
+
 function Dashboard:compDeskClockPhoto(ctx, w, h)
     local folder = "plugins/dashboard.koplugin/photos/"
-    local has_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    local lfs = require("libs/libkoreader-lfs")
     local paths = {}
-    if has_lfs and lfs.attributes(folder, "mode") == "directory" then
+    if lfs.attributes(folder, "mode") == "directory" then
         for name in lfs.dir(folder) do
             local extension = name:lower():match("%.([^%.]+)$")
             local path = folder .. name
@@ -5122,31 +5164,19 @@ function Dashboard:compDeskClockPhoto(ctx, w, h)
         end
     end
     table.sort(paths)
+    self.photo_paths = paths
     self.photo_count = #paths
     local child
     if self.photo_count > 0 then
         local slot = dashboardPhotoSlot(self)
-        local RenderImage = require("ui/renderimage")
-        local loaded, source = pcall(RenderImage.renderImageFile, RenderImage, paths[slot + 1])
-        if loaded and source then
-            local image_w, image_h = source:getWidth(), source:getHeight()
-            local target_w, target_h = math.max(1, math.floor(w)), math.max(1, math.floor(h))
-            local crop_w = math.max(1, math.min(image_w, math.floor(image_h * target_w / target_h)))
-            local crop_h = math.max(1, math.min(image_h, math.floor(image_w * target_h / target_w)))
-            local crop_x = math.floor((image_w - crop_w) / 2)
-            local crop_y = math.floor((image_h - crop_h) / 2)
-            local bitmap = source:viewport(crop_x, crop_y, crop_w, crop_h):scale(target_w, target_h)
-            source:free()
-            child = ImageWidget:new{ image = bitmap, width = target_w, height = target_h }
-        end
+        child = self:makeDashboardPhoto(paths[slot + 1], w, h)
         self._deskclock_photo_slot = slot
     end
     child = child or self:makeText(ctx, TL("请把照片放到 photos 文件夹", "Add photos to the photos folder"),
         18, { max_width = w })
-    return CenterContainer:new{
-        dimen = Geom:new{ w = w, h = h },
-        child,
-    }
+    local view = CenterContainer:new{ dimen = Geom:new{ w = w, h = h }, child }
+    self.photo_view = view
+    return view
 end
 
 
@@ -5192,6 +5222,7 @@ function Dashboard:buildZone(ctx, orient, key, box_w, content_w, box_h)
     -- 当前这一帧的值。盒子在每次重排时重建，记录自然跟着换。
     if comp.expandable or (id == "deskclock_photo" and self._deskclock_photo_slot ~= nil and self.photo_count > 1) then
         local rec = { kind = comp.expandable, id = id, w = box_w, h = box_h }
+        if id == "deskclock_photo" then rec.photo_card = box end
         self.zone_hits[key] = rec
         local base_paint = box.paintTo
         box.paintTo = function(this, bb, x, y)
@@ -6956,11 +6987,13 @@ end
 function Dashboard:hintLine(ctx)
     local cfg = self:getConfig()
     if G_reader_settings:readSetting("dashboard_show_hints") ~= false then
-        local hint = TL("休眠时按电源键唤醒", "Press Power to wake")
+        local hint = self.sleep_state and self.shown and not Device.screen_saver_mode
+            and TL("向上滑退出看板", "Swipe up to exit")
+            or TL("休眠时按电源键唤醒", "Press Power to wake")
         if self._deskclock_photo_slot ~= nil and self.photo_count > 1 then
             hint = hint .. TL(" · 点击照片切换", " · Tap photo to switch")
         end
-        return hint
+        return hint .. TL(" · 左右滑动切换屏幕方向", " · Swipe sideways to rotate")
     end
     local parts = {}
     local w = self.weather
