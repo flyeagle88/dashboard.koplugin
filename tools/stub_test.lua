@@ -623,6 +623,12 @@ end
 
 local NetworkMgr = {}
 function NetworkMgr:runWhenOnline(fn) fn() end
+package.preload["ui/trapper"] = function()
+    return {
+        wrap = function(_, fn) fn() end,
+        dismissableRunInSubprocess = function(_, fn) return true, fn() end,
+    }
+end
 
 local store = {}
 local G_settings = {}
@@ -1172,14 +1178,8 @@ EVENTS[#EVENTS + 1] = "== init() 通过 =="
 local menu_items = {}
 instance:addToMainMenu(menu_items)
 local desk = menu_items.dashboard_desk
--- 配置入口要落到「设置 → 屏幕 → 屏保」之下：menusorter 递归按 id 找目标，
--- 屏保那项的 id 就是 "screensaver"。hint 写错（或目标不存在）项会被静默丢弃。
-if desk.sorting_hint ~= "screensaver" then
-    print("[FAIL] 菜单没挂到屏保之下，sorting_hint = " .. tostring(desk.sorting_hint))
-    os.exit(1)
-end
-if not desk.separator then
-    print("[FAIL] 没说要在屏保原生项前画分隔线")
+if desk.sorting_hint ~= "tools" then
+    print("[FAIL] 菜单没挂到工具之下，sorting_hint = " .. tostring(desk.sorting_hint))
     os.exit(1)
 end
 -- 顶层结构与「一页放得下」的硬约束（v2.60）。
@@ -1479,9 +1479,9 @@ end)()
     -- 1) 无时区设备：钟面时间就是 os.time()，一点偏移都不能加
     mock_no_tz()
     local want = real_date("!%H:%M", ts)
-    local got_hint = instance:hintLine(nil)
+    local got_hint = instance:fmtClock(ts)
     if got_hint:sub(1, 5) ~= want then
-        print(string.format("[FAIL] 无时区设备的页脚天气时刻应为 %s，实际 %q（时区偏移加了两遍？）",
+        print(string.format("[FAIL] 无时区设备的天气时刻应为 %s，实际 %q（时区偏移加了两遍？）",
             want, got_hint))
         os.exit(1)
     end
@@ -1495,9 +1495,9 @@ end)()
     os.date = real_date
     if CD.deviceHasTz() then
         local want2 = real_date("!%H:%M", ts + instance:getTz().offset * 60)
-        local got2 = instance:hintLine(nil)
+        local got2 = instance:fmtClock(ts)
         if got2:sub(1, 5) ~= want2 then
-            print(string.format("[FAIL] 有时区设备的页脚天气时刻应为 %s，实际 %q",
+            print(string.format("[FAIL] 有时区设备的天气时刻应为 %s，实际 %q",
                 want2, got2))
             os.exit(1)
         end
@@ -1645,56 +1645,16 @@ if not instance.screensaver_owned then
     print("[FAIL] 休眠时没有标记屏保归看板接管")
     os.exit(1)
 end
--- v2.71：唤醒时看板自己已经刷过整屏了（条带擦除），不能再让 framework 补一次
--- 整屏 full —— 那一下才是按电源键后最明显的黑闪，所以 close 必须返回 false。
--- 柔化刷新绕过了 setDirty（自己画 bb + mech_refresh(GL16)），断言改看真实 ioctl。
--- 注意：本文件主 chunk 的局部变量已贴着 200 上限，这里一个 local 都不能再加，
--- 改用哨兵记录 + 全局计数。
-STUB_DIRTY_CALLS[#STUB_DIRTY_CALLS + 1] = "WAKE_MARK"
-STUB_FLUSHES[#STUB_FLUSHES + 1] = { waveform = "WAKE_MARK" }
-if Screensaver:close() ~= false then
-    print("[FAIL] 唤醒时仍让 framework 补整屏 full（v2.70 起看板自己刷过了）")
+if Screensaver:close() ~= true then
+    print("[FAIL] 唤醒后 KOReader 没收到重绘请求")
     os.exit(1)
 end
-STUB_WAKE_FLUSHES = 0
-STUB_WAKE_FULLS = 0
-for i = #STUB_FLUSHES, 1, -1 do
-    if STUB_FLUSHES[i].waveform == "WAKE_MARK" then break end
-    STUB_WAKE_FLUSHES = STUB_WAKE_FLUSHES + 1
-    if STUB_FLUSHES[i].flashing or STUB_FLUSHES[i].waveform ~= screen.waveform_partial then
-        print("[FAIL] 唤醒重绘没用本机的不闪波形（波形="
-            .. tostring(STUB_FLUSHES[i].waveform) .. "，应为 "
-            .. tostring(screen.waveform_partial) .. "）")
-        os.exit(1)
-    end
-    -- 唤醒整屏推几次？每多推一次就多等一个完整波形周期（REAGL 约 400~500ms），
-    -- 用户按完电源键站在那儿等，多推 3 次就是一秒多的「怎么还没好」。
-    local fw = STUB_FLUSHES[i]
-    if fw.x == 0 and fw.y == 0 and fw.w and fw.h
-        and fw.w >= screen.getWidth() and fw.h >= screen.getHeight() then
-        STUB_WAKE_FULLS = STUB_WAKE_FULLS + 1
-    end
-end
-if STUB_WAKE_FLUSHES == 0 then
-    print("[FAIL] 唤醒时看板没自己刷屏（屏幕会停在屏保帧上）")
+if Device.screen_saver_mode or instance.screensaver_owned or instance.shown or instance.root then
+    print("[FAIL] 唤醒后看板没有退出")
     os.exit(1)
 end
-if STUB_WAKE_FULLS > 1 then
-    print(string.format("[FAIL] 唤醒整屏推了 %d 次（应为 1 次）", STUB_WAKE_FULLS))
-    os.exit(1)
-end
-for i = #STUB_DIRTY_CALLS, 1, -1 do
-    if STUB_DIRTY_CALLS[i] == "WAKE_MARK" then break end
-    if STUB_DIRTY_CALLS[i] == "full" then
-        print("[FAIL] 唤醒过程中又排了一次整屏 full（会黑闪）")
-        os.exit(1)
-    end
-end
-if Device.screen_saver_mode then
-    print("[FAIL] 唤醒后 screen_saver_mode 没有复位")
-    os.exit(1)
-end
-EVENTS[#EVENTS + 1] = "== 休眠（看板已打开）：复用当前画面，唤醒走条带擦除不反白 =="
+EVENTS[#EVENTS + 1] = "== 休眠（看板已打开）：唤醒后关闭看板 =="
+instance:open()
 
 -- ============ 点按展开：坐标命中 + 列表菜单 ============
 -- 摆放位置靠「绘制时记录」而不是「按布局算」：版心居中、留白、间距拉伸都会
@@ -2066,7 +2026,8 @@ end
 -- 当前方向要用文字标出来，否则用户看不出现在是哪个
 local marked = 0
 for _, sub in ipairs(orient_item.sub_item_table) do
-    if sub.text:find(T("（当前）"), 1, true) then marked = marked + 1 end
+    local label = sub.text_func and sub.text_func() or sub.text
+    if label and label:find(T("（当前）"), 1, true) then marked = marked + 1 end
 end
 if marked ~= 1 then
     print("[FAIL] 版式菜单没有（或重复）标出「当前」方向")
@@ -2154,24 +2115,12 @@ if #stack ~= stack_before_sleep2 - 1 then
     print("[FAIL] 撤菜单后控件栈层数不对")
     os.exit(1)
 end
-Screensaver:close()
-if instance._resume_ts == nil then
-    print("[FAIL] 唤醒后没有记录唤醒时刻，天气会在唤醒瞬间同步拉取")
+if Screensaver:close() ~= true or instance.shown or instance.root then
+    print("[FAIL] 从菜单进入休眠后，唤醒没有退出看板")
     os.exit(1)
 end
-EVENTS[#EVENTS + 1] = "== 菜单开着时休眠：先撤菜单再定格看板 =="
-
--- 唤醒要重建版面：定时器走 CLOCK_MONOTONIC，休眠期间不走，
--- 唤醒后最多还要再等一整分钟才到点，这一分钟里屏幕上是睡前的时钟。
-local root_before_wake = instance.root
-instance._resume_ts = nil
-stub_sleep()
-Screensaver:close()
-if instance.root == root_before_wake then
-    print("[FAIL] 唤醒后没有重建版面（时钟/电量会停在休眠前）")
-    os.exit(1)
-end
-EVENTS[#EVENTS + 1] = "== 唤醒后重建版面并重置定时器 =="
+EVENTS[#EVENTS + 1] = "== 菜单开着时休眠：先撤菜单，唤醒后退出看板 =="
+instance:open()
 
 for _, z in ipairs(instance.root._zones or {}) do
     if z.id == "dashboard_swipe_side" then side_zone = z end
@@ -3417,13 +3366,10 @@ EVENTS[#EVENTS + 1] = "== 未配置提示：缺凭据弹一次，配好后不再
 -- ================= 分区组件与多语言（v2.44）
 
 -- 1) 没有设置时，三区必须回落到默认组件
--- v2.53 起 B 区默认是 today_actions（今日行动），不再是 lunar_term / calendar：
--- 面积最大的一块留给「今天要做什么」，农历仍可在菜单里选回来。
--- v2.62 起横屏 C 区默认是在读卡（原侧栏三合一）；侧栏仍可在菜单里选回来。
 local lay = instance:getZoneLayout()
-if lay.portrait.A ~= "clock_weather" or lay.portrait.B ~= "today_actions"
+if lay.portrait.A ~= "clock_weather" or lay.portrait.B ~= "deskclock_photo"
     or lay.portrait.C ~= "stats_cells" or lay.landscape.A ~= "clock_weather"
-    or lay.landscape.B ~= "today_actions" or lay.landscape.C ~= "reading_now" then
+    or lay.landscape.B ~= "deskclock_photo" or lay.landscape.C ~= "side_panel" then
     print("[FAIL] 无设置时没有回落到默认分区")
     os.exit(1)
 end
@@ -3434,13 +3380,13 @@ G_reader_settings:saveSetting("dashboard_components", {
     landscape = { A = "lunar_term", B = "side_panel", C = "calendar" },
 })
 local lay2 = instance:getZoneLayout()
-if lay2.portrait.A ~= "clock_weather" or lay2.portrait.B ~= "today_actions"
+if lay2.portrait.A ~= "clock_weather" or lay2.portrait.B ~= "deskclock_photo"
     or lay2.portrait.C ~= "stats_cells" then
     print(string.format("[FAIL] 竖屏非法组件未回落：%s/%s/%s",
         lay2.portrait.A, lay2.portrait.B, lay2.portrait.C))
     os.exit(1)
 end
-if lay2.landscape.A ~= "clock_weather" or lay2.landscape.C ~= "reading_now" then
+if lay2.landscape.A ~= "clock_weather" or lay2.landscape.C ~= "side_panel" then
     print("[FAIL] 横屏越区组件未回落默认")
     os.exit(1)
 end
