@@ -22,7 +22,7 @@ dashboard_config.local.lua（或菜单「天气服务」）里填写 API Host �
   · 上划屏幕      -> 退出看板
 
 配置入口（两处，同一份菜单项 genMenuItemTable）：
-  · 设置 → 屏幕 → 屏保 → 桌面看板（不开看板时改，靠 sorting_hint="screensaver" 挂进去）
+  · 工具 → 桌面看板（不开看板时改）
   · 看板打开时屏幕上缘下滑（TouchMenu；KOReader 菜单被看板盖住时进不去）
   顶层固定 6 组（外观 / 地点与天气 / 内容 / 显示与省电 / 语言 / 使用说明），
   因为 TouchMenu 一页最多 10 条、横屏只有 9 条，超过就要翻页（v2.60 前的 15 条平铺
@@ -804,7 +804,7 @@ end
 --   竖屏 版心 1020×1389、内容列 920 → A 414 / B 518 / C 239 px
 --   横屏 版心 1396×1018、内容列 1276 → A 295 / 下半 565（B 630 + 分隔 53 + C 593）
 local ZONE_SPEC = {
-    portrait  = { A = 224, B = 292, C = 148, gap = 16, head_gap = 12, card_pad = 14, foot_gap = 12 },
+    portrait  = { A = 224, B = 292, C = 148, gap = 16, top_pad = 10, head_gap = 8, card_pad = 14, foot_gap = 12 },
     landscape = { A = 181, lower = 296,        gap = 14, head_gap = 12, card_pad = 14, foot_gap = 12 },
 }
 
@@ -827,8 +827,8 @@ local ZONE_KEYS = { "A", "B", "C" }
 --- "一天看一次就够"的信息，而读书进度是每次拿起设备都想知道的；要换回来在菜单里选。
 --- 注意：这里只影响**没有 dashboard_components 设置的设备**，已存过配置的不动。
 local ZONE_DEFAULT = {
-    portrait  = { A = "clock_weather", B = "today_actions", C = "stats_cells" },
-    landscape = { A = "clock_weather", B = "today_actions", C = "reading_now" },
+    portrait  = { A = "clock_weather", B = "deskclock_photo", C = "stats_cells" },
+    landscape = { A = "clock_weather", B = "deskclock_photo", C = "side_panel" },
 }
 
 --- 组件注册表。zones 按方向分别声明白名单（同一个组件在竖屏能进的区
@@ -922,6 +922,10 @@ local COMPONENTS = {
     -- 「今日行动」= 今日待办打卡（主体）+ 最近一条倒数日（脚注）。
     -- 与 todo 的区别：todo 是纯清单，这个是「今天要做的 + 还有几天到期」的合成块，
     -- 专门给 B 区（面积最大、视觉重心）用。点按同样展开待办列表。
+    deskclock_photo = {
+        label = "个人家庭照片", zones = { portrait = { "B" }, landscape = { "B" } },
+        build = "compDeskClockPhoto",
+    },
     today_actions = {
         label = "今日行动", zones = { portrait = { "A", "B" }, landscape = { "B", "C" } },
         expandable = "todo",
@@ -976,27 +980,12 @@ function Dashboard:contentBox(W, H)
     return S, edge, W - edge * 2, H - edge * 2
 end
 
---- 横屏下半区宽度：左 B（7 个日历格宽）/ 右 C（吃掉剩余）。
---- v2.53 起两张卡之间不画竖线，只留一段纸底空隙，所以不再扣 vline_w。
---- 横屏下半区宽度：左 B（7 个日历格宽）/ 右 C（吃掉剩余）。
---- 入参是**整版心宽**（与 A 卡同宽），不是扣过内边距的可用宽：
---- v2.53 传的是 avail，结果下半区总宽比 A 卡窄两个 card_pad，
---- C 卡右沿比 A 卡缩进 50px，看着像 C 区右侧留白更多（其实是不齐）。
+--- 横屏 B/C 平分扣除中间间距后的版心，奇数像素留给右卡。
 function Dashboard:lowerWidths(total, S)
     local gap = math.floor(ZONE_SPEC.landscape.gap * S)
-    local right_min = math.floor(330 * S)
-    local cell_w = math.min(math.floor(52 * S),
-        math.floor((total - right_min - gap) / 7))
-    cell_w = math.max(math.floor(34 * S), cell_w)
-    local bw = cell_w * 7
-    local cw = total - bw - gap
-    -- 右卡有下限：够窄时让 B 卡吐宽度（日历格宽已经封了上限 52du）
-    local min_c = math.floor(260 * S)
-    if cw < min_c then
-        cw = math.min(min_c, total - gap - math.floor(140 * S))
-        bw = total - gap - cw
-    end
-    return bw, cw
+    local available = total - gap
+    local left = math.floor(available / 2)
+    return left, available - left
 end
 
 -- ------------------------------------------------------------------ 生命周期
@@ -1061,36 +1050,29 @@ function Dashboard:onCloseWidget()
 end
 
 -- ------------------------------------------------------------------ 菜单
---- 把看板配置挂到「设置 → 屏幕 → 屏保」之下（v2.42）。
----
---- 为什么能挂进去：KOReader 的插件菜单项只按 sorting_hint 归位，而
---- frontend/ui/menusorter.lua 的 sort() 对「带 sorting_hint 的项」是这样处理的：
----   local m = self:findById(menu_table["KOMenu:menu_buttons"], sorting_hint)
----   m = m.sub_item_table or m
----   table.insert(m, v)
---- 而 findById 是**递归**遍历 sub_item_table 的，所以 hint 指到哪个子菜单，项就追加进
---- 那个子菜单。readermenu.lua 里注册屏保那一项的写法是
----   self.menu_items.screensaver = { text = T("Sleep screen"),
----       sub_item_table = dofile("frontend/ui/elements/screensaver_menu.lua") }
---- id 正好是 "screensaver"，所以 hint 给 "screensaver" 就落到屏保菜单里，不用改核心文件。
----
---- 一个坑：hint 目标不存在时，menusorter 是**直接把项丢掉**（只有没 hint 的项才会
---- 被塞进第一个标签页当孤儿，带 hint 找不到就 logger.warn 然后什么也不做）。
---- 所以先确认设备支持屏保；不支持就退回「工具」标签页，不能让入口凭空消失。
 function Dashboard:addToMainMenu(menu_items)
-    local hint = "tools"
-    local ok, supports = pcall(function() return Device:supportsScreensaver() end)
-    if ok and supports then
-        hint = "screensaver"
+    local first = { "dashboard_desk", "deskclock", "deskclock_landscape" }
+    for _, module in ipairs({ "ui/elements/reader_menu_order", "ui/elements/filemanager_menu_order" }) do
+        local ok, order = pcall(require, module)
+        if ok and type(order.tools) == "table" then
+            for index = #first, 1, -1 do
+                local id = first[index]
+                for position = #order.tools, 1, -1 do
+                    if order.tools[position] == id then
+                        table.remove(order.tools, position)
+                    end
+                end
+                table.insert(order.tools, 1, id)
+            end
+        end
     end
     menu_items.dashboard_desk = {
-        sorting_hint = hint,
+        sorting_hint = "tools",
         text = T("桌面看板"),
-        -- 和屏保自带的那几组设置之间画一条线，视觉上分开
-        separator = true,
         sub_item_table = self:genMenuItemTable(),
     }
 end
+
 
 function Dashboard:genMenuItemTable()
     -- 顶层只放 6 条（Settings 入口 7 条，含「打开看板」）。
@@ -1156,7 +1138,7 @@ function Dashboard:genMenuItemTable()
                     text = TL(
                         "手势：点按刷新天气 · 上划退出看板\n"
                         .. "屏幕上缘下滑 → 打开看板菜单（外观 / 地点与天气 / 内容 / 显示与省电）\n"
-                        .. "看板没打开时：设置 → 屏幕 → 屏保 → 桌面看板（同一套菜单）\n"
+                        .. "看板没打开时：工具 → 桌面看板（同一套菜单）\n"
                         .. "城市可选国内与海外（亚洲/欧洲/美洲/大洋洲/非洲）；\n"
                         .. "选海外城市会自动把时区一并改掉，\n"
                         .. "也可点「地点与天气 → 自动检测我的位置（按 IP）」让它自己挑最近的城市。\n"
@@ -1181,7 +1163,7 @@ function Dashboard:genMenuItemTable()
                         "Gestures: tap to refresh · swipe up to exit\n"
                         .. "Swipe down from the top edge: dashboard menu (appearance / location & weather /\n"
                         .. "content / display & power)\n"
-                        .. "When closed: Settings → Screen → Sleep screen → Desk dashboard\n"
+                        .. "When closed: Tools → Desk dashboard\n"
                         .. "Cities cover China plus Asia, Europe, the Americas, Oceania and Africa;\n"
                         .. "picking an overseas one also sets its time zone.\n"
                         .. "Or use Location & weather → Detect my location (by IP) to pick the nearest city.\n"
@@ -1222,10 +1204,12 @@ end
 --- 方向 → TouchMenu 自己 closeMenu() → close_callback → 立刻转屏重排。
 --- 当前方向改用文字标注（不能依赖屏幕旋转结果：转不了屏的机型会退化成纯版式切换）。
 function Dashboard:genAppearanceMenu()
-    local cur_mode = self:currentOrientationMode()
     local function orientEntry(text, mode)
         return {
-            text = (cur_mode == mode) and (text .. T("（当前）")) or text,
+            text_func = function()
+                if self:currentOrientationMode() ~= mode then return text end
+                return text .. (self.shown and T("（当前）") or TL("（已选）", " (selected)"))
+            end,
             -- TouchMenu 调 callback 时会把**菜单自己**作为第一个参数传进来
             -- （源码注释：Provide callback with us, so it can call our closemenu()）。
             -- 真机上「靠 onMenuSelect 自动关菜单」这条分支没生效，所以这里拿住菜单
@@ -1409,10 +1393,10 @@ function Dashboard:genDisplayPowerMenu()
                 "When off, the footer only shows the data time and source.\n"
                 .. "When on, the gesture hints take up a full line at the bottom."),
             checked_func = function()
-                return G_reader_settings:readSetting("dashboard_show_hints") == true
+                return G_reader_settings:readSetting("dashboard_show_hints") ~= false
             end,
             callback = function()
-                local on = G_reader_settings:readSetting("dashboard_show_hints") == true
+                local on = G_reader_settings:readSetting("dashboard_show_hints") ~= false
                 G_reader_settings:saveSetting("dashboard_show_hints", not on)
                 if G_reader_settings.flush then G_reader_settings:flush() end
                 if self.shown then self:refreshLayout() end
@@ -1958,12 +1942,14 @@ function Dashboard:displayOffset(tz)
 end
 
 function Dashboard:localNow()
+    -- Match the KOReader clock and both desktop clocks on the Kindle Basic 2.
+    if Device.model == "KindleBasic2" then return os.date("*t") end
     return os.date("!*t", os.time() + self:displayOffset() * 60)
 end
 
---- epoch 秒 → 本机钟面的 HH:MM。天气数据时刻、页脚都走这条路。
 function Dashboard:fmtClock(ts, tz)
     if not ts then return "" end
+    if Device.model == "KindleBasic2" then return os.date("%H:%M", ts) end
     return os.date("!%H:%M", ts + self:displayOffset(tz) * 60)
 end
 
@@ -2071,8 +2057,10 @@ function Dashboard:open()
         -- → 整屏 full → GC16+FULL 整屏反白，这就是「点开看板时黑闪一下」。
         self:refreshLayout("wipe")
     end
-    self:fetchWeather()
     self:scheduleTick()
+    UIManager:nextTick(function()
+        if self.shown and not Device.screen_saver_mode then self:fetchWeather() end
+    end)
     -- 首绘之后的落地检查（v2.77 起不再补擦顶部一条，理由见 brushTopStrip 的说明）
     --
     -- v2.69：**本次会话的第一次开板**曾经无条件再整屏确认一次。现在判据是
@@ -2093,6 +2081,7 @@ end
 --- 只在「确实缺 host 或 key」且「从没提示过」时弹一次，配置好之后永久不再打扰。
 --- 标记写在 KOReader 全局设置里，卸载插件时随之失效，不需要额外清理。
 function Dashboard:maybeShowSetupHint()
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return end
     local cfg = self:getConfig()
     local qw = cfg.qweather or {}
     local has_host = qw.api_host and qw.api_host ~= ""
@@ -2108,14 +2097,14 @@ function Dashboard:maybeShowSetupHint()
                 .. "当前天气走 Open-Meteo 降级源：温度、现象、湿度、风力、日出日落都正常，"
                 .. "但空气质量是由 PM2.5/PM10 浓度换算出的估算值，不是国标 AQI。\n\n"
                 .. "要改用和风天气：\n"
-                .. "设置 → 屏幕 → 屏保 → 桌面看板 → 天气服务，"
+                .. "工具 → 桌面看板 → 天气服务，"
                 .. "填入 API Host 与 API Key（两者需属于同一个和风项目）。\n\n"
                 .. "此提示只出现一次。",
                 "No QWeather credentials configured.\n\n"
                 .. "Weather is currently taken from the Open-Meteo fallback: temperature,\n"
                 .. "condition, humidity, wind and sunrise/sunset are fine, but air quality\n"
                 .. "is estimated from PM2.5/PM10 instead of the official CN AQI.\n\n"
-                .. "To use QWeather: Settings → Screen → Sleep screen → Desk dashboard\n"
+                .. "To use QWeather: Tools → Desk dashboard\n"
                 .. "→ Weather service, and fill in API Host and API Key (same project).\n\n"
                 .. "This hint appears only once."),
             timeout = 15,
@@ -2261,10 +2250,23 @@ end
 --- 建一棵看板控件树并画到屏幕上（仅在休眠时用，不启动定时器）
 function Dashboard:renderSaverFrame()
     if self.saver_root then return end
-    local ok, root = pcall(self.createRoot, self)
+    local mode = G_reader_settings:readSetting("dashboard_orientation")
+    local landscape
+    local base = screen_rotation()
+    if base ~= nil and (mode == "portrait" or mode == "landscape" or mode == "landscape_ccw") then
+        local target = target_rotation(base, mode)
+        if target ~= base then
+            self.saver_base_rotation = base
+            Screen:setRotationMode(target)
+            if screen_rotation() ~= target then
+                error("dashboard: 屏保方向切换失败")
+            end
+        end
+        landscape = mode ~= "portrait"
+    end
+    local ok, root = pcall(self.createRoot, self, landscape)
     if not ok or not root then
-        logger.warn("dashboard: 休眠屏保渲染失败", tostring(root))
-        return
+        error("dashboard: 休眠屏保渲染失败: " .. tostring(root))
     end
     self.saver_root = root
     UIManager:show(root)
@@ -2294,37 +2296,25 @@ end
 function Dashboard:dismissSaverFrame()
     local root = self.saver_root
     self.saver_root = nil
+    local rotation = self.saver_base_rotation
+    self.saver_base_rotation = nil
+    if rotation ~= nil and screen_rotation() ~= rotation then
+        local ok, err = pcall(Screen.setRotationMode, Screen, rotation)
+        if not ok then logger.warn("dashboard: 恢复屏保前方向失败", tostring(err)) end
+    end
     if root then
         pcall(function() UIManager:close(root) end)
     end
 end
 
---- 唤醒：撤掉屏保树，并把看板校正到「现在」。
---- 返回值：本函数是否已经把整屏刷过了。外面拿它决定要不要再让 framework
---- 补一次 setDirty("all","full")——见 installScreenSaverHook 里的说明。
+--- 唤醒时撤掉屏保，并关闭休眠前打开的看板。
 function Dashboard:onLeaveScreenSaver()
-    -- 唤醒后 4 秒内，把 framework 那记整屏 full 也换成本机的不闪波形。
-    -- 只在这一小段里生效：之后用户翻页、开菜单都该走 KOReader 自己的选择。
     self._soften_until = os.time() + 4
     self:dismissSaverFrame()
     self.screensaver_owned = false
-    if not self.shown then return false end
-    -- 两个问题一起解决：
-    --  · 定时器基于 CLOCK_MONOTONIC，休眠期间不走，唤醒后最多还要再等一整分钟
-    --    才到点，这一分钟里屏幕上还是睡前的时钟；
-    --  · 电量、日期、农历、跨日（睡过去一整晚）也都是旧的。
-    -- 直接重建一次版面最省事，也把电池/日期一次校正。
-    self._resume_ts = os.time()
-    -- v2.72：唤醒这一刷是一次整屏柔化推（本机 partial 波形，不反白）。
-    -- 按电源键之后是全屏内容整体换一遍，原来整屏 full 就是那一下最明显的黑闪；
-    -- 现在只把像素写上去、不做清屏相位，屏幕不会先反白。
-    self:refreshLayout("wipe")
-    -- 唤醒是状态栏残留最常见的时机：framework 醒来第一件事就是重画时间与电量，
-    -- 那时看板还没重排，重排完那条就压在顶上了——补一刀只擦顶部。
-    self:brushTopStrip()
-    self:scheduleTick()
-    -- 菜单占着屏时 refreshLayout 只会挂个待办、并不会画，这种情形不能替 framework 兜底
-    return not self.menu_open
+    if self.shown then
+        self:close()
+    end
 end
 
 --- 把我们的逻辑挂到 Screensaver 的 show/close 上（只装一次，只在 Kindle 上装）
@@ -2347,6 +2337,8 @@ function Dashboard:installScreenSaverHook()
         if not ok2 then
             -- 接管失败就老老实实退回原生屏保，别把休眠弄坏
             logger.warn("dashboard: 屏保接管失败，回退原生", tostring(err))
+            this._own_full = nil
+            this:dismissSaverFrame()
             return orig_show(ss, ...)
         end
     end
@@ -2364,19 +2356,12 @@ function Dashboard:installScreenSaverHook()
         -- Device.screen_saver_mode 复位的地方，跳过它下次休眠就进不了 show 分支了。
         -- 它的返回值（「没有 widget」时是 nil）不能用，返回值由下面自己给。
         orig_close(ss, ...)
-        local ok2, repainted = pcall(function() return this:onLeaveScreenSaver() end)
+        local ok2, err = pcall(this.onLeaveScreenSaver, this)
         if not ok2 then
-            logger.warn("dashboard: 唤醒处理失败", tostring(repainted))
-            -- 唤醒处理挂了：老实退回老做法，让 framework 补一次整屏 full
-            return true
+            logger.warn("dashboard: 唤醒处理失败", tostring(err))
         end
-        -- v2.70：这里原来无条件 return true，等于唤醒必有一记整屏 full ——
-        -- 而 onLeaveScreenSaver 自己刚用柔化整屏刷过一遍，紧接着 framework 又整屏反白，
-        -- 那一刷白做。现在只有「我们自己没刷」时才让它补：
-        --   · 看板没打开（用户在看书/书架）→ 屏幕还停在屏保帧，必须让 framework 刷回来
-        --   · 菜单占着屏导致重排被挂起 → 同上
-        -- 其余情形我们已经把整屏刷完了，返回 false 免得再闪一下。
-        return not repainted
+        -- 让 KOReader 重绘书架或阅读页。
+        return true
     end
 
     logger.dbg("dashboard: 已接管休眠屏保")
@@ -2451,6 +2436,14 @@ function Dashboard:scheduleTick()
     UIManager:scheduleIn(math.max(1, remain), self._tick_fn)
 end
 
+local function dashboardPhotoSlot(board)
+    local now = os.time()
+    if board.photo_switched_at and now >= board.photo_switched_at then
+        return (board.photo_manual_slot + math.floor((now - board.photo_switched_at) / 300)) % board.photo_count
+    end
+    return math.floor(now / 300) % board.photo_count
+end
+
 function Dashboard:tick()
     if not self.shown or not self.root then return end
     -- 屏保态不干活：休眠时定时器本来就不会走，这里防的是挂起前刚好到点的那一拍，
@@ -2498,7 +2491,9 @@ function Dashboard:tick()
 
     -- 跨日：日期/农历/节气/月历全部要重算
     local day_key = string.format("%04d%02d%02d", now.year, now.month, now.day)
-    if day_key ~= self.day_key then
+    if self._deskclock_photo_slot ~= nil and self._deskclock_photo_slot ~= dashboardPhotoSlot(self) then
+        self:refreshLayout("wipe")
+    elseif day_key ~= self.day_key then
         -- v2.72：跨日整版换（日期/农历/节气/月历全变），走整屏柔化刷而不是整屏反白
         self:refreshLayout("wipe")
     elseif not low and pc.full_refresh > 0 then
@@ -3077,6 +3072,7 @@ end
 --- 维持能力分支的写法（`if not softRepaintEnabled() then 退回整屏 full`），
 --- 真换到不支持的机型时只改这一处即可。
 function Dashboard:softRepaintEnabled()
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return false end
     -- v2.78 取消了开关，v3.0 定稿保留能力探测的形态。
     -- 实测这块屏上不反白的波形只有 REAGL，而 REAGL 正是 KOReader 翻页在用的那条路，
     -- 没有任何理由退回「每次整屏先反白」。函数保留是因为调用点都写成能力分支
@@ -3202,6 +3198,7 @@ end
 ---  方括号模式绕开这两条，落到 refreshNoMergePartial → refreshPartialImp，
 ---  在 PW3 上就是 REAGL + FULL，和 KOReader 翻页完全同一条路径。
 function Dashboard:installSoftRefreshHook()
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return end
     if self._soft_hooked then return end
     local orig = UIManager and UIManager._refresh
     if type(orig) ~= "function" then return end
@@ -3280,6 +3277,7 @@ end
 --- 三个 Imp 里 is_flashing 都是 true）。把它们改成走 refreshPartialImp，
 --- 就等于 mech_refresh(false, waveform_partial) —— PW3 上就是 KOReader 翻页那一刷。
 function Dashboard:installSoftImpHook()
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return end
     if self._soft_imp_hooked then return end
     if not (Screen and type(Screen.refreshPartialImp) == "function") then return end
     self._soft_imp_hooked = true
@@ -3401,7 +3399,7 @@ function Dashboard:refreshLayout(mode)
         -- —— v2.73 真机日志里 15:43:01 那第二次 wipe 就是这么来的。
         self._open_painted = self:softFullRefresh(mode == "wipe" and "wipe" or "soft")
     else
-        UIManager:setDirty(nil, mode or "full")
+        UIManager:setDirty(nil, mode == "soft" and "ui" or "full")
         self._open_painted = false
     end
     self._own_full = nil
@@ -3430,6 +3428,7 @@ end
 --- 看板自己那一次用 _own_full 标记放行。窗口从转屏开始到看板画完，
 --- 另挂 3 秒兜底——静音状态绝不能留到下一次（留着的话整机以后所有整屏刷新都会被吞掉）。
 function Dashboard:beginRotateMute()
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return end
     if self._mute_full then return end
     local orig = UIManager._refresh
     if not orig then return end       -- 桩件里没有这个内部入口，直接跳过
@@ -3636,11 +3635,18 @@ function Dashboard:getOrientation()
     return "portrait"
 end
 
---- 当前生效的方向（给菜单打「（当前）」标记用）。
---- 不能直接用 getOrientation()：那是按屏幕真实旋转反推的，转不了屏的机型
---- 会退化成「只换版式」，此时屏幕永远是竖的，标记就会一直指在「竖屏」上。
+--- 看板打开时标记实际生效的方向；关闭时标记下次打开会用的设置。
 function Dashboard:currentOrientationMode()
-    if self.orientation_mode then return self.orientation_mode end
+    if self.shown then
+        if self.force_landscape ~= nil and self.orientation_mode then
+            return self.orientation_mode
+        end
+        return self:getOrientation()
+    end
+    local saved = G_reader_settings:readSetting("dashboard_orientation")
+    if saved == "portrait" or saved == "landscape" or saved == "landscape_ccw" then
+        return saved
+    end
     return self:getOrientation()
 end
 
@@ -4366,7 +4372,7 @@ end
 function Dashboard:menuFallback()
     UIManager:show(InfoMessage:new{
         text = TL("这个 KOReader 版本无法在看板内弹出菜单。\n"
-            .. "请先上划退出看板，再从阅读界面上缘下拉 → 设置 → 屏幕 → 屏保 → 桌面看板。\n\n"
+            .. "请先上划退出看板，再从阅读界面上缘下拉 → 工具 → 桌面看板。\n\n"
             .. "看板内可直接用的手势：点按刷新、上划退出、左右滑动重新布局。",
             "This KOReader build cannot open the menu inside the dashboard.\n"
             .. "Swipe up to exit, then pull down from the top edge → Settings → Screen\n"
@@ -4539,13 +4545,16 @@ local function fitGapScale(body, base_h, limit_h)
     return best
 end
 
-function Dashboard:createRoot()
+function Dashboard:createRoot(saver_landscape)
+    self._deskclock_photo_slot = nil
     local W, H = Screen:getWidth(), Screen:getHeight()
     -- 版式方向：默认按屏幕像素尺寸判断；左右滑动切换过之后由 force_landscape 指定。
     -- Kindle 没有重力感应，设备横过来时屏幕像素方向也不变（仍是 1072x1448），
     -- 只按 W >= H 判断的话，横过来永远还是竖屏那套版式。
     local landscape
-    if self.force_landscape ~= nil then
+    if saver_landscape ~= nil then
+        landscape = saver_landscape
+    elseif self.force_landscape ~= nil then
         landscape = self.force_landscape
     else
         landscape = W >= H
@@ -4668,9 +4677,9 @@ function Dashboard:createRoot()
     -- 所以「顶部下滑」区可以安全地和全屏的上划区共存。
     root:registerTouchZones({
         {
-            -- 必须排在最前：命中可展开组件时吃掉这一下，没命中返回 false，
-            -- 后面的「点按刷新」照常接管（框架按注册顺序问，false 就继续问下一个）。
+            -- 照片和可展开卡片优先处理点按，空白处再交给天气刷新。
             id = "dashboard_zone_tap",
+            overrides = { "dashboard_tap" },
             ges = "tap",
             screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
             handler = function(ges)
@@ -4680,7 +4689,19 @@ function Dashboard:createRoot()
                 local key = self:zoneHitAt(pos.x, pos.y)
                 if not key then return false end
                 -- 直接在这里弹菜单会重入事件分发，推迟一拍
-                UIManager:nextTick(function() self:openZoneList(key) end)
+                local hit = self.zone_hits[key]
+                UIManager:nextTick(function()
+                    if not self.shown then return end
+                    if hit.id == "deskclock_photo" then
+                        local slot = self._deskclock_photo_slot
+                        if slot == nil then return end
+                        self.photo_manual_slot = (slot + 1) % self.photo_count
+                        self.photo_switched_at = os.time()
+                        self:refreshLayout("wipe")
+                    else
+                        self:openZoneList(key)
+                    end
+                end)
                 return true
             end,
         },
@@ -4849,9 +4870,35 @@ function Dashboard:buildWeatherBlock(ctx, icon_px, temp_px, max_w)
     }
     -- 文字区可用的宽度；留一个下限，避免极端情况下被压成一条竖线
     local side_max = max_w and math.max(math.floor(60 * S), max_w - icon_w - gap) or nil
+    if ctx.landscape then
+        local temp = self:makeNum(ctx, d.temp, temp_px, { max_width = math.floor(side_max * 0.52) })
+        local info_gap = math.floor(12 * S)
+        local info_w = math.max(1, side_max - temp:getSize().w - info_gap)
+        local info = VerticalGroup:new{
+            align = "left",
+            self:makeText(ctx, d.cond, 24, { max_width = info_w }),
+            mkPad(1, math.floor(4 * S)),
+            d.feels and self:makeText(ctx, d.feels, 17, { color = INK2, max_width = info_w })
+                or mkPad(1, 1),
+        }
+        return VerticalGroup:new{
+            align = "left",
+            self:makeText(ctx, I18n.city(self:getCity()), 22, { color = INK2, max_width = max_w }),
+            mkPad(1, math.floor(8 * S)),
+            HorizontalGroup:new{
+                align = "center",
+                icon,
+                mkPad(gap, 1),
+                temp,
+                mkPad(info_gap, 1),
+                info,
+            },
+        }
+    end
     local side = VerticalGroup:new{
         align = "left",
         -- 温度是纯拉丁数字串，换衬线；下面两行是中文，一律留在黑体。
+        self:makeText(ctx, I18n.city(self:getCity()), 18, { color = INK2, max_width = side_max }),
         self:makeNum(ctx, d.temp, temp_px, { max_width = side_max }),
         self:makeText(ctx, d.cond, 26, { max_width = side_max }),
         d.feels and self:makeText(ctx, d.feels, 17, { color = INK2, max_width = side_max })
@@ -5060,6 +5107,49 @@ function Dashboard:iconBitmap(name, px, opts)
     return nil
 end
 
+function Dashboard:compDeskClockPhoto(ctx, w, h)
+    local folder = "plugins/dashboard.koplugin/photos/"
+    local has_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    local paths = {}
+    if has_lfs and lfs.attributes(folder, "mode") == "directory" then
+        for name in lfs.dir(folder) do
+            local extension = name:lower():match("%.([^%.]+)$")
+            local path = folder .. name
+            if (extension == "png" or extension == "jpg" or extension == "jpeg")
+                and lfs.attributes(path, "mode") == "file" then
+                paths[#paths + 1] = path
+            end
+        end
+    end
+    table.sort(paths)
+    self.photo_count = #paths
+    local child
+    if self.photo_count > 0 then
+        local slot = dashboardPhotoSlot(self)
+        local RenderImage = require("ui/renderimage")
+        local loaded, source = pcall(RenderImage.renderImageFile, RenderImage, paths[slot + 1])
+        if loaded and source then
+            local image_w, image_h = source:getWidth(), source:getHeight()
+            local target_w, target_h = math.max(1, math.floor(w)), math.max(1, math.floor(h))
+            local crop_w = math.max(1, math.min(image_w, math.floor(image_h * target_w / target_h)))
+            local crop_h = math.max(1, math.min(image_h, math.floor(image_w * target_h / target_w)))
+            local crop_x = math.floor((image_w - crop_w) / 2)
+            local crop_y = math.floor((image_h - crop_h) / 2)
+            local bitmap = source:viewport(crop_x, crop_y, crop_w, crop_h):scale(target_w, target_h)
+            source:free()
+            child = ImageWidget:new{ image = bitmap, width = target_w, height = target_h }
+        end
+        self._deskclock_photo_slot = slot
+    end
+    child = child or self:makeText(ctx, TL("请把照片放到 photos 文件夹", "Add photos to the photos folder"),
+        18, { max_width = w })
+    return CenterContainer:new{
+        dimen = Geom:new{ w = w, h = h },
+        child,
+    }
+end
+
+
 function Dashboard:buildZone(ctx, orient, key, box_w, content_w, box_h)
     -- 三个区共用同一份配置，不要每个区都读一遍设置
     local id = self:ctxZoneLayout(ctx)[orient][key]
@@ -5100,7 +5190,7 @@ function Dashboard:buildZone(ctx, orient, key, box_w, content_w, box_h)
     -- 判断点到的是哪个区。坐标只有绘制时才确定（版心居中 → 四边留白 → 拉伸间距
     -- 都会影响），所以在 paintTo 里顺手存一份；点按一定发生在绘制之后，读到的是
     -- 当前这一帧的值。盒子在每次重排时重建，记录自然跟着换。
-    if comp.expandable then
+    if comp.expandable or (id == "deskclock_photo" and self._deskclock_photo_slot ~= nil and self.photo_count > 1) then
         local rec = { kind = comp.expandable, id = id, w = box_w, h = box_h }
         self.zone_hits[key] = rec
         local base_paint = box.paintTo
@@ -5133,6 +5223,7 @@ function Dashboard:buildPortrait(ctx)
     local rows = {}
     local function push(x) rows[#rows + 1] = x end
 
+    push(mkPad(W, math.max(1, math.floor(spec.top_pad * S))))
     push(self:buildHeader(ctx, cpad))
     push(mkPad(W, math.floor(spec.head_gap * S)))
 
@@ -5146,8 +5237,10 @@ function Dashboard:buildPortrait(ctx)
         end
     end
 
-    push(mkPad(W, math.floor(spec.foot_gap * S)))
-    push(self:buildHintRow(ctx, content_w, cpad, 17))
+    if G_reader_settings:readSetting("dashboard_show_hints") ~= false then
+        push(mkPad(W, math.floor(spec.foot_gap * S)))
+        push(self:buildHintRow(ctx, content_w, cpad, 17))
+    end
     return VerticalGroup:new{ align = "left", unpack(rows) }
 end
 
@@ -5184,8 +5277,10 @@ function Dashboard:buildLandscape(ctx)
         right,
     })
 
-    push(mkPad(W, math.floor(spec.foot_gap * S)))
-    push(self:buildHintRow(ctx, avail, cpad, 17))
+    if G_reader_settings:readSetting("dashboard_show_hints") ~= false then
+        push(mkPad(W, math.floor(spec.foot_gap * S)))
+        push(self:buildHintRow(ctx, avail, cpad, 17))
+    end
     return VerticalGroup:new{ align = "left", unpack(rows) }
 end
 
@@ -5242,7 +5337,21 @@ function Dashboard:compClockWeather(ctx, w, h, k)
         math.floor((land and 78 or 76) * k),
         math.floor((land and 62 or 54) * k),
         math.max(math.floor(w * 0.42), w - clock_block:getSize().w - min_gap))
-    local fill = math.max(min_gap, w - clock_block:getSize().w - weather:getSize().w)
+    local free = w - clock_block:getSize().w - weather:getSize().w
+    if land then
+        local gap = math.max(0, math.min(math.floor(48 * S), free))
+        local group = HorizontalGroup:new{
+            align = "center",
+            clock_block,
+            mkPad(gap, 1),
+            weather,
+        }
+        return CenterContainer:new{
+            dimen = Geom:new{ w = w, h = group:getSize().h },
+            group,
+        }
+    end
+    local fill = math.max(min_gap, free)
     return HorizontalGroup:new{
         align = "center",
         clock_block,
@@ -6846,16 +6955,12 @@ end
 --- ctx 可省：桩件的断言直接调 instance:hintLine() 对文案，这时自己去取时区。
 function Dashboard:hintLine(ctx)
     local cfg = self:getConfig()
-    -- 手势提示默认关（v2.53）：它是「头三天有用、此后天天占一行」的东西。
-    -- 开关放 G_reader_settings 而不是 dashboard_config.lua，
-    -- 这样在设备上点一下就能切，不必插 USB 改文件。
-    if G_reader_settings:readSetting("dashboard_show_hints") == true then
-        local line = T("点按刷新 · 点卡片展开 · 上划退出 · 顶部下滑菜单 · 左右滑动换版式")
-        if cfg.show_attribution then
-            local src = self:sourceShort()
-            if src then line = line .. " · " .. src end
+    if G_reader_settings:readSetting("dashboard_show_hints") ~= false then
+        local hint = TL("休眠时按电源键唤醒", "Press Power to wake")
+        if self._deskclock_photo_slot ~= nil and self.photo_count > 1 then
+            hint = hint .. TL(" · 点击照片切换", " · Tap photo to switch")
         end
-        return line
+        return hint
     end
     local parts = {}
     local w = self.weather
@@ -6895,14 +7000,15 @@ end
 
 -- ------------------------------------------------------------------ 天气拉取
 function Dashboard:fetchWeather(manual)
+    if os.getenv("DASHBOARD_DESKTOP_PREVIEW") == "1" then return end
     if self.fetching then return end
     self.fetching = true
     -- 记录「尝试时刻」：tick 的间隔判断要用它，否则没有数据时会每拍都发起请求
     self.last_fetch_ts = os.time()
 
     -- 离线时不走 runWhenOnline，避免 KOReader 弹出「连接 WiFi」对话框打断看板
-    if NetworkMgr.isOnline then
-        local called, online = pcall(function() return NetworkMgr:isOnline() end)
+    if NetworkMgr.isConnected then
+        local called, online = pcall(function() return NetworkMgr:isConnected() end)
         if called and not online then
             self.fetching = false
             if manual then
@@ -6911,7 +7017,6 @@ function Dashboard:fetchWeather(manual)
                     timeout = 3,
                 })
             end
-            if self.shown then self:refreshLayout() end
             return
         end
     end
@@ -6922,42 +7027,52 @@ function Dashboard:fetchWeather(manual)
     -- 必然白跑一趟（还占一次配额），直接走 Open-Meteo
     local overseas = city.global == true
 
-    NetworkMgr:runWhenOnline(function()
-        local weather, air, err
-        if not overseas then
-            -- 请求三个接口是同步的，用 pcall 兜住意外错误，否则 fetching 标志会卡死，
-            -- 之后再也不会重试
-            local called, w, a, e = pcall(QWeather.fetch, {
-                city = city,
-                tz = tz,
-                config = cfg,
-            })
-            if called then
-                weather, air, err = w, a, e
-            else
-                logger.warn("dashboard: 和风拉取异常", tostring(w))
-                err = tostring(w)
-            end
-        end
-
-        -- 主源拿不到数据就降级到 Open-Meteo：免凭据，只求界面不空着。
-        -- 降级成功时页脚会标注来源，不会让人误以为仍是和风的数据。
-        -- 海外城市没有「和风可用」这个前提，不受 fallback_openmeteo 开关限制。
-        if not weather and (overseas or cfg.fallback_openmeteo ~= false) then
+    local Trapper = require("ui/trapper")
+    Trapper:wrap(function()
+        local completed, result = Trapper:dismissableRunInSubprocess(function()
+            local weather, air, err
             if not overseas then
-                logger.warn("dashboard: 和风不可用，降级到 Open-Meteo：", tostring(err))
+                -- 请求三个接口是同步的，用 pcall 兜住意外错误，否则 fetching 标志会卡死，
+                -- 之后再也不会重试
+                local called, w, a, e = pcall(QWeather.fetch, {
+                    city = city,
+                    tz = tz,
+                    config = cfg,
+                })
+                if called then
+                    weather, air, err = w, a, e
+                else
+                    logger.warn("dashboard: 和风拉取异常", tostring(w))
+                    err = tostring(w)
+                end
             end
-            local ok2, w2, a2, e2 = pcall(OpenMeteo.fetch, { city = city, tz = tz })
-            if not ok2 then
-                logger.warn("dashboard: Open-Meteo 降级异常", tostring(w2))
-                err = (err and (err .. "；") or "") .. tostring(w2)
-            elseif w2 then
-                weather, air = w2, a2 or air
-                err = nil
-            else
-                err = (err and (err .. "；") or "") .. tostring(e2 or T("降级同样失败"))
+
+            -- 主源拿不到数据就降级到 Open-Meteo：免凭据，只求界面不空着。
+            -- 降级成功时页脚会标注来源，不会让人误以为仍是和风的数据。
+            -- 海外城市没有「和风可用」这个前提，不受 fallback_openmeteo 开关限制。
+            if not weather and (overseas or cfg.fallback_openmeteo ~= false) then
+                if not overseas then
+                    logger.warn("dashboard: 和风不可用，降级到 Open-Meteo：", tostring(err))
+                end
+                local ok2, w2, a2, e2 = pcall(OpenMeteo.fetch, { city = city, tz = tz })
+                if not ok2 then
+                    logger.warn("dashboard: Open-Meteo 降级异常", tostring(w2))
+                    err = (err and (err .. "；") or "") .. tostring(w2)
+                elseif w2 then
+                    weather, air = w2, a2 or air
+                    err = nil
+                else
+                    err = (err and (err .. "；") or "") .. tostring(e2 or T("降级同样失败"))
+                end
             end
+
+            return { weather = weather, air = air, err = err }
+        end)
+        if not completed or type(result) ~= "table" or self:getCity().name ~= city.name then
+            self.fetching = false
+            return
         end
+        local weather, air, err = result.weather, result.air, result.err
 
         if weather then
             self.weather = weather
